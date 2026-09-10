@@ -1,5 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus } from '@nestjs/common';
+import {
+  ArgumentsHost,
+  Catch,
+  ExceptionFilter,
+  HttpException,
+  HttpStatus,
+  Logger,
+} from '@nestjs/common';
 import { DomainException } from './domain.exception';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
@@ -17,6 +24,8 @@ export interface ProblemDetails {
 
 @Catch()
 export class ProblemDetailsFilter implements ExceptionFilter {
+  private readonly logger = new Logger(ProblemDetailsFilter.name);
+
   catch(exception: unknown, host: ArgumentsHost): void {
     const context = host.switchToHttp();
     const request = context.getRequest<FastifyRequest>();
@@ -35,6 +44,11 @@ export class ProblemDetailsFilter implements ExceptionFilter {
           : undefined;
     const requestId = request.id || randomUUID();
     const details = this.extractDetails(response);
+
+    if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
+      const message = exception instanceof Error ? exception.message : 'Unknown error';
+      this.logger.error(`${request.method} ${request.url} -> ${status}: ${message}`);
+    }
 
     const body: ProblemDetails = {
       type: `https://api.spawn.local/problems/${details.code.toLowerCase()}`,

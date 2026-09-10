@@ -6,6 +6,7 @@ import { LoggerModule } from 'nestjs-pino';
     LoggerModule.forRoot({
       pinoHttp: {
         level: process.env.LOG_LEVEL ?? 'info',
+        autoLogging: false,
         redact: {
           paths: [
             'req.headers.authorization',
