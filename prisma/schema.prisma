@@ -1,0 +1,407 @@
+generator client {
+  provider   = "prisma-client-js"
+  engineType = "client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum OnchainPhase {
+  NONE
+  BONDING_CURVE
+  GRADUATED
+}
+
+enum Timeframe {
+  H1
+  H24
+  D7
+  D30
+  ALL
+}
+
+enum TradeSide {
+  BUY
+  SELL
+}
+
+enum CandleInterval {
+  M1
+  M5
+  M15
+  H1
+  H4
+  D1
+}
+
+enum MilestoneKind {
+  CORE
+  EXTENSION
+}
+
+enum MilestoneState {
+  PENDING
+  DEPLOYED
+  PARTIAL
+  COMPLETED
+  HARVESTED
+}
+
+enum IdempotencyState {
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+}
+
+model Profile {
+  walletAddress  String        @id @db.VarChar(42)
+  username       String?       @unique @db.VarChar(32)
+  usernameFolded String?       @unique @db.VarChar(32)
+  bio            String?       @db.VarChar(1200)
+  imageUri       String?       @db.VarChar(512)
+  createdAt      DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime      @updatedAt @db.Timestamptz(6)
+  links          ProfileLink[]
+  tokens         Token[]
+  comments       Comment[]
+  commentLikes   CommentLike[]
+
+  @@map("profiles")
+}
+
+model ProfileLink {
+  id            String   @id @default(uuid()) @db.Uuid
+  walletAddress String   @db.VarChar(42)
+  kind          String   @db.VarChar(32)
+  url           String   @db.VarChar(512)
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  profile       Profile  @relation(fields: [walletAddress], references: [walletAddress], onDelete: Cascade)
+
+  @@unique([walletAddress, kind])
+  @@map("profile_links")
+}
+
+model Token {
+  id                   String                   @id @default(uuid()) @db.Uuid
+  claimedCreatorWallet String                   @db.VarChar(42)
+  name                 String                   @db.VarChar(320)
+  symbol               String                   @db.VarChar(12)
+  description          String                   @db.VarChar(8000)
+  imageUri             String                   @db.VarChar(512)
+  ipfsUri              String                   @db.VarChar(512)
+  gatewayUrl           String                   @db.VarChar(2048)
+  socials              Json?
+  createdAt            DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime                 @updatedAt @db.Timestamptz(6)
+  creator              Profile                  @relation(fields: [claimedCreatorWallet], references: [walletAddress])
+  deploymentSigner     TokenDeploymentSigner?
+  deploymentBinding    TokenDeploymentBinding?
+  projections          TokenChainState[]
+  metrics              TokenMetric[]
+  trades               Trade[]
+  candles              Candle[]
+  milestones           Milestone[]
+  holdings             Holding[]
+  comments             Comment[]
+
+  @@index([claimedCreatorWallet, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@map("tokens")
+}
+
+model TokenDeploymentSigner {
+  tokenId       String                       @id @db.Uuid
+  signerAddress String                       @unique @db.VarChar(42)
+  algorithm     String                       @default("secp256k1") @db.VarChar(32)
+  createdAt     DateTime                     @default(now()) @db.Timestamptz(6)
+  token         Token                        @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  secret        TokenDeploymentSignerSecret?
+
+  @@map("token_deployment_signers")
+}
+
+model TokenDeploymentSignerSecret {
+  tokenId    String                @id @db.Uuid
+  version    Int
+  algorithm  String                @db.VarChar(32)
+  keyId      String                @db.VarChar(128)
+  iv         Bytes
+  ciphertext Bytes
+  authTag    Bytes
+  createdAt  DateTime              @default(now()) @db.Timestamptz(6)
+  signer     TokenDeploymentSigner @relation(fields: [tokenId], references: [tokenId], onDelete: Cascade)
+
+  @@map("token_deployment_signer_secrets")
+}
+
+model TokenDeploymentBinding {
+  tokenId         String   @id @db.Uuid
+  chainId         Int
+  signerAddress   String   @unique @db.VarChar(42)
+  configHash      String   @unique @db.VarChar(66)
+  transactionHash String   @db.VarChar(66)
+  logIndex        Int
+  contractAddress String?  @db.VarChar(42)
+  poolId          String?  @db.VarChar(66)
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  token           Token    @relation(fields: [tokenId], references: [id], onDelete: Restrict)
+
+  @@unique([chainId, transactionHash, logIndex])
+  @@unique([chainId, contractAddress])
+  @@unique([chainId, poolId])
+  @@map("token_deployment_bindings")
+}
+
+model IdempotencyRequest {
+  id             String           @id @default(uuid()) @db.Uuid
+  scope          String           @db.VarChar(128)
+  walletAddress  String           @db.VarChar(42)
+  key            String           @db.VarChar(128)
+  requestHash    String           @db.VarChar(66)
+  state          IdempotencyState @default(IN_PROGRESS)
+  responseStatus Int?
+  responseBody   Json?
+  resourceId     String?          @db.Uuid
+  expiresAt      DateTime         @db.Timestamptz(6)
+  createdAt      DateTime         @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime         @updatedAt @db.Timestamptz(6)
+
+  @@unique([scope, walletAddress, key])
+  @@index([expiresAt])
+  @@map("idempotency_requests")
+}
+
+model OutboxEvent {
+  id             String    @id @default(uuid()) @db.Uuid
+  topic          String    @db.VarChar(128)
+  aggregateId    String    @db.VarChar(128)
+  attemptVersion Int?
+  payload        Json
+  availableAt    DateTime  @default(now()) @db.Timestamptz(6)
+  leaseOwner     String?   @db.VarChar(128)
+  leaseExpiresAt DateTime? @db.Timestamptz(6)
+  publishedAt    DateTime? @db.Timestamptz(6)
+  attempts       Int       @default(0)
+  lastError      String?   @db.VarChar(1000)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@index([publishedAt, availableAt])
+  @@map("outbox_events")
+}
+
+model DomainGeneration {
+  domain     String   @id @db.VarChar(128)
+  generation BigInt   @default(0)
+  updatedAt  DateTime @updatedAt @db.Timestamptz(6)
+
+  @@map("domain_generations")
+}
+
+model TokenChainState {
+  tokenId                  String       @db.Uuid
+  chainId                  Int
+  phase                    OnchainPhase
+  contractAddress          String       @db.VarChar(42)
+  poolId                   String       @db.VarChar(66)
+  launchCreatorWallet      String       @db.VarChar(42)
+  creatorRevenueNftId      Decimal?     @db.Decimal(78, 0)
+  creatorRevenueOwner      String?      @db.VarChar(42)
+  totalSupply              Decimal      @db.Decimal(78, 0)
+  decimals                 Int
+  curveAllocationBps       Int          @default(2500)
+  milestoneAllocationBps   Int          @default(6500)
+  fullRangeAllocationBps   Int          @default(1000)
+  creatorHarvestSplitWad   Decimal      @db.Decimal(38, 18)
+  buybackHarvestSplitWad   Decimal      @db.Decimal(38, 18)
+  protocolHarvestSplitWad  Decimal      @db.Decimal(38, 18)
+  lpHarvestSplitWad        Decimal      @db.Decimal(38, 18)
+  curveCount               Int          @default(32)
+  completedCoreMilestones  Int          @default(0)
+  completedExtraMilestones Int          @default(0)
+  feeBps                   Int
+  projectionVersion        BigInt
+  sourceBlockNumber        BigInt
+  sourceBlockHash          String       @db.VarChar(66)
+  sourceBlockTime          DateTime     @db.Timestamptz(6)
+  provenance               String       @db.VarChar(64)
+  updatedAt                DateTime     @updatedAt @db.Timestamptz(6)
+  token                    Token        @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@id([tokenId, chainId])
+  @@unique([chainId, contractAddress])
+  @@unique([chainId, poolId])
+  @@index([phase, sourceBlockTime])
+  @@map("token_chain_states")
+}
+
+model TokenMetric {
+  tokenId           String    @db.Uuid
+  chainId           Int
+  timeframe         Timeframe
+  priceUsd          Decimal?  @db.Decimal(100, 36)
+  marketCapUsd      Decimal?  @db.Decimal(100, 36)
+  volumeUsd         Decimal?  @db.Decimal(100, 36)
+  priceChangePct    Decimal?  @db.Decimal(38, 18)
+  tradeCount        BigInt?
+  holderCount       BigInt?
+  projectionVersion BigInt
+  sourceBlockNumber BigInt
+  sourceBlockTime   DateTime  @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @db.Timestamptz(6)
+  token             Token     @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@id([tokenId, chainId, timeframe])
+  @@index([timeframe, volumeUsd(sort: Desc)])
+  @@index([timeframe, marketCapUsd(sort: Desc)])
+  @@map("token_metrics")
+}
+
+model ChainWatermark {
+  chainId          Int      @id
+  committedVersion BigInt
+  blockNumber      BigInt
+  blockHash        String   @db.VarChar(66)
+  blockTime        DateTime @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
+
+  @@map("chain_watermarks")
+}
+
+model TokenWatermark {
+  tokenId          String   @db.Uuid
+  chainId          Int
+  committedVersion BigInt
+  blockNumber      BigInt
+  blockHash        String   @db.VarChar(66)
+  blockTime        DateTime @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
+
+  @@id([tokenId, chainId])
+  @@map("token_watermarks")
+}
+
+model Trade {
+  chainId           Int
+  transactionHash   String    @db.VarChar(66)
+  logIndex          Int
+  transactionIndex  Int
+  tokenId           String    @db.Uuid
+  side              TradeSide
+  traderWallet      String    @db.VarChar(42)
+  tokenAmountRaw    Decimal   @db.Decimal(78, 0)
+  quoteAmountRaw    Decimal   @db.Decimal(78, 0)
+  priceUsd          Decimal?  @db.Decimal(100, 36)
+  valueUsd          Decimal?  @db.Decimal(100, 36)
+  blockNumber       BigInt
+  blockHash         String    @db.VarChar(66)
+  blockTime         DateTime  @db.Timestamptz(6)
+  canonical         Boolean   @default(true)
+  projectionVersion BigInt
+  token             Token     @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@id([chainId, transactionHash, logIndex])
+  @@index([tokenId, chainId, blockNumber(sort: Desc), transactionIndex(sort: Desc), logIndex(sort: Desc)])
+  @@index([tokenId, chainId, tokenAmountRaw(sort: Desc)])
+  @@map("trades")
+}
+
+model Candle {
+  tokenId           String         @db.Uuid
+  chainId           Int
+  interval          CandleInterval
+  bucketStart       DateTime       @db.Timestamptz(6)
+  open              Decimal        @db.Decimal(100, 36)
+  high              Decimal        @db.Decimal(100, 36)
+  low               Decimal        @db.Decimal(100, 36)
+  close             Decimal        @db.Decimal(100, 36)
+  volumeUsd         Decimal        @db.Decimal(100, 36)
+  tradeCount        BigInt
+  projectionVersion BigInt
+  token             Token          @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@id([tokenId, chainId, interval, bucketStart])
+  @@map("candles")
+}
+
+model Milestone {
+  tokenId            String         @db.Uuid
+  chainId            Int
+  kind               MilestoneKind
+  index              Int
+  state              MilestoneState
+  lowerTick          Int
+  upperTick          Int
+  tokenInventoryRaw  Decimal        @db.Decimal(78, 0)
+  tokenRemainingRaw  Decimal        @db.Decimal(78, 0)
+  quoteProceedsRaw   Decimal        @db.Decimal(78, 0)
+  creatorHarvestRaw  Decimal        @default(0) @db.Decimal(78, 0)
+  buybackHarvestRaw  Decimal        @default(0) @db.Decimal(78, 0)
+  protocolHarvestRaw Decimal        @default(0) @db.Decimal(78, 0)
+  lpHarvestRaw       Decimal        @default(0) @db.Decimal(78, 0)
+  feeBps             Int
+  projectionVersion  BigInt
+  sourceBlockNumber  BigInt
+  sourceBlockTime    DateTime       @db.Timestamptz(6)
+  token              Token          @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@id([tokenId, chainId, kind, index])
+  @@index([tokenId, chainId, state, kind, index])
+  @@map("milestones")
+}
+
+model Holding {
+  walletAddress     String   @db.VarChar(42)
+  tokenId           String   @db.Uuid
+  chainId           Int
+  balanceRaw        Decimal  @db.Decimal(78, 0)
+  valueUsd          Decimal? @db.Decimal(100, 36)
+  lastActivityAt    DateTime @db.Timestamptz(6)
+  projectionVersion BigInt
+  sourceBlockNumber BigInt
+  sourceBlockTime   DateTime @db.Timestamptz(6)
+  token             Token    @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@id([walletAddress, tokenId, chainId])
+  @@index([walletAddress, valueUsd(sort: Desc)])
+  @@index([walletAddress, lastActivityAt(sort: Desc)])
+  @@map("holdings")
+}
+
+model Comment {
+  id            String        @id @default(uuid()) @db.Uuid
+  tokenId       String        @db.Uuid
+  walletAddress String        @db.VarChar(42)
+  parentId      String?       @db.Uuid
+  rootId        String        @db.Uuid
+  depth         Int
+  text          String?       @db.VarChar(8000)
+  isDeleted     Boolean       @default(false)
+  likeCount     Int           @default(0)
+  replyCount    Int           @default(0)
+  createdAt     DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime      @updatedAt @db.Timestamptz(6)
+  deletedAt     DateTime?     @db.Timestamptz(6)
+  token         Token         @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  author        Profile       @relation(fields: [walletAddress], references: [walletAddress])
+  parent        Comment?      @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Restrict)
+  replies       Comment[]     @relation("CommentReplies")
+  likes         CommentLike[]
+
+  @@unique([id, tokenId])
+  @@index([tokenId, parentId, createdAt])
+  @@index([tokenId, rootId, createdAt])
+  @@index([tokenId, parentId, likeCount(sort: Desc), createdAt(sort: Desc)])
+  @@map("comments")
+}
+
+model CommentLike {
+  commentId     String   @db.Uuid
+  walletAddress String   @db.VarChar(42)
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  comment       Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  profile       Profile  @relation(fields: [walletAddress], references: [walletAddress])
+
+  @@id([commentId, walletAddress])
+  @@map("comment_likes")
+}

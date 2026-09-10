@@ -1,0 +1,294 @@
+{
+  "openapi": "3.0.3",
+  "paths": {
+    "/api/v1/tokens": {
+      "get": {
+        "operationId": "listTokens",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "tokens"
+        ]
+      },
+      "post": {
+        "operationId": "createToken",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Token created with uploaded IPFS metadata"
+          }
+        },
+        "summary": "",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/api/v1/tokens/featured": {
+      "get": {
+        "operationId": "getFeaturedTokens",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/api/v1/tokens/{tokenRef}/trades": {
+      "get": {
+        "operationId": "listTokenTrades",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/api/v1/tokens/{tokenRef}/candles": {
+      "get": {
+        "operationId": "listTokenCandles",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/api/v1/tokens/{tokenRef}/milestones": {
+      "get": {
+        "operationId": "listTokenMilestones",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/api/v1/tokens/{tokenRef}": {
+      "get": {
+        "operationId": "getToken",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/api/v1/profiles/{walletAddress}": {
+      "get": {
+        "operationId": "getProfile",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "profiles"
+        ]
+      },
+      "put": {
+        "operationId": "updateProfile",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "profiles"
+        ]
+      }
+    },
+    "/api/v1/profiles/{walletAddress}/tokens": {
+      "get": {
+        "operationId": "listProfileTokens",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "profiles"
+        ]
+      }
+    },
+    "/api/v1/profiles/{walletAddress}/portfolio": {
+      "get": {
+        "operationId": "getProfilePortfolio",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "profiles"
+        ]
+      }
+    },
+    "/api/v1/tokens/{tokenRef}/comments": {
+      "post": {
+        "operationId": "createTokenComment",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "comments"
+        ]
+      },
+      "get": {
+        "operationId": "listTokenComments",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "comments"
+        ]
+      }
+    },
+    "/api/v1/comments/{id}": {
+      "delete": {
+        "operationId": "deleteComment",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "comments"
+        ]
+      }
+    },
+    "/api/v1/comments/{id}/replies": {
+      "get": {
+        "operationId": "listCommentReplies",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "comments"
+        ]
+      }
+    },
+    "/api/v1/comments/{id}/likes/{walletAddress}": {
+      "get": {
+        "operationId": "getCommentLikeStatus",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "comments"
+        ]
+      },
+      "put": {
+        "operationId": "likeComment",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "comments"
+        ]
+      },
+      "delete": {
+        "operationId": "unlikeComment",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "comments"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "Spawn API",
+    "description": "Offchain launchpad API merged with committed onchain projections",
+    "version": "1.0.0",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "schemas": {}
+  }
+}

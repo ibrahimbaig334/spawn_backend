@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.18.1
+          cache: pnpm
+      - run: corepack enable
+      - run: corepack prepare pnpm@12.3.4 --activate
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm prisma:generate
+      - run: pnpm prisma:validate
+        env:
+          DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/spawn
+      - run: pnpm openapi:check
+        env:
+          NODE_ENV: development
+          PROCESS_ROLE: api
+          DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/spawn
+          REDIS_URL: redis://localhost:6379
+          PRIVATE_KEY_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          PRIVATE_KEY_ENCRYPTION_KEY_ID: openapi
+          THIRDWEB_SECRET_KEY: openapi-placeholder
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
