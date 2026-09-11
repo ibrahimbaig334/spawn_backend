@@ -29,7 +29,6 @@ export class ProfilesService {
     if (cached) return cached;
     const profile = await this.prisma.profile.findUnique({
       where: { walletAddress: wallet },
-      include: { links: { orderBy: { kind: 'asc' } } },
     });
     if (!profile) throw new NotFoundException({ code: 'PROFILE_NOT_FOUND' });
     await this.cache.set(key, profile, { ttlSeconds: CACHE_TTL_SECONDS.profile });
@@ -44,7 +43,6 @@ export class ProfilesService {
         where: { walletAddress: wallet },
         create: { walletAddress: wallet, ...data },
         update: data,
-        include: { links: { orderBy: { kind: 'asc' } } },
       });
       await this.cache.delete(`profiles:${wallet}`);
       return profile;
@@ -72,33 +70,41 @@ export class ProfilesService {
       this.prisma.token.count({ where }),
       this.prisma.token.findMany({
         where,
-        include: {
-          projections: {
-            where: {
-              chainId: query.chainId,
-              projectionVersion: { lte: watermark?.committedVersion ?? -1n },
-            },
-            take: 1,
-          },
-        },
+        include: { projection: true },
         orderBy: [{ createdAt: query.sort === 'oldest' ? 'asc' : 'desc' }, { id: 'asc' }],
         skip: query.skip,
         take: query.limit,
       }),
     ]);
     const result = {
-      data: tokens.map((token) => ({
-        tokenId: token.id,
-        name: token.name,
-        symbol: token.symbol,
-        description: token.description,
-        imageUri: token.imageUri,
-        ipfsUri: token.ipfsUri,
-        gatewayUrl: token.gatewayUrl,
-        socials: token.socials,
-        onchain: token.projections[0] ?? null,
-        createdAt: token.createdAt,
-      })),
+      data: tokens.map((token) => {
+        const projection =
+          watermark &&
+          token.projection !== null &&
+          token.projection.chainId === query.chainId &&
+          token.projection.projectionVersion <= watermark.committedVersion
+            ? token.projection
+            : null;
+        return {
+          tokenId: token.id,
+          name: token.name,
+          symbol: token.symbol,
+          description: token.description,
+          imageUri: token.imageUri,
+          ipfsUri: token.ipfsUri,
+          gatewayUrl: token.gatewayUrl,
+          socials: token.socials,
+          onchain:
+            projection === null
+              ? null
+              : {
+                  phase: projection.phase,
+                  contractAddress: projection.contractAddress,
+                  poolId: projection.poolId,
+                },
+          createdAt: token.createdAt,
+        };
+      }),
       meta: pageMeta(query.page, query.limit, total),
     };
     await this.cache.set(key, result, { ttlSeconds: CACHE_TTL_SECONDS.creatorTokens });
@@ -140,13 +146,14 @@ export class ProfilesService {
                   name: true,
                   symbol: true,
                   imageUri: true,
-                  projections: {
-                    where: {
-                      chainId: query.chainId,
-                      projectionVersion: { lte: watermark.committedVersion },
+                  projection: {
+                    select: {
+                      decimals: true,
+                      contractAddress: true,
+                      phase: true,
+                      chainId: true,
+                      projectionVersion: true,
                     },
-                    select: { decimals: true, contractAddress: true, phase: true },
-                    take: 1,
                   },
                 },
               },
@@ -164,7 +171,9 @@ export class ProfilesService {
         return {
           walletAddress: wallet,
           chainId: query.chainId,
-          data: holdings.map((holding) => this.holdingItem(holding)),
+          data: holdings.map((holding) =>
+            this.holdingItem(holding, query.chainId, watermark.committedVersion),
+          ),
           aggregatePricedValueUsd: aggregates._sum.valueUsd ?? new Prisma.Decimal(0),
           unpricedCount: aggregates._count._all - aggregates._count.valueUsd,
           meta: pageMeta(query.page, query.limit, total),
@@ -205,31 +214,47 @@ export class ProfilesService {
     if (!profile) throw new NotFoundException({ code: 'PROFILE_NOT_FOUND' });
   }
 
-  private holdingItem(holding: {
-    tokenId: string;
-    balanceRaw: Prisma.Decimal;
-    valueUsd: Prisma.Decimal | null;
-    lastActivityAt: Date;
-    sourceBlockNumber: bigint;
-    sourceBlockTime: Date;
-    token: {
-      id: string;
-      name: string;
-      symbol: string;
-      imageUri: string;
-      projections: Array<{ decimals: number; contractAddress: string; phase: string }>;
-    };
-  }): Record<string, unknown> {
-    const projection = holding.token.projections[0];
+  private holdingItem(
+    holding: {
+      tokenId: string;
+      balanceRaw: Prisma.Decimal;
+      valueUsd: Prisma.Decimal | null;
+      lastActivityAt: Date;
+      sourceBlockNumber: bigint;
+      sourceBlockTime: Date;
+      token: {
+        id: string;
+        name: string;
+        symbol: string;
+        imageUri: string;
+        projection: {
+          decimals: number;
+          contractAddress: string;
+          phase: string;
+          chainId: number;
+          projectionVersion: bigint;
+        } | null;
+      };
+    },
+    chainId: number,
+    committedVersion: bigint,
+  ): Record<string, unknown> {
+    const projection = holding.token.projection;
+    const onchain =
+      projection !== null &&
+      projection.chainId === chainId &&
+      projection.projectionVersion <= committedVersion
+        ? projection
+        : null;
     return {
       tokenId: holding.tokenId,
       name: holding.token.name,
       symbol: holding.token.symbol,
       imageUri: holding.token.imageUri,
-      contractAddress: projection?.contractAddress ?? null,
-      phase: projection?.phase ?? null,
+      contractAddress: onchain?.contractAddress ?? null,
+      phase: onchain?.phase ?? null,
       balanceRaw: holding.balanceRaw,
-      balance: projection ? humanBalance(holding.balanceRaw, projection.decimals) : null,
+      balance: onchain ? humanBalance(holding.balanceRaw, onchain.decimals) : null,
       valueUsd: holding.valueUsd,
       lastActivityAt: holding.lastActivityAt,
       sourceBlockNumber: holding.sourceBlockNumber,

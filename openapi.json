@@ -27,6 +27,16 @@
             }
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTokenDto"
+              }
+            }
+          }
+        },
         "responses": {
           "201": {
             "description": "Token created with uploaded IPFS metadata"
@@ -56,7 +66,16 @@
     "/api/v1/tokens/{tokenRef}/trades": {
       "get": {
         "operationId": "listTokenTrades",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "tokenRef",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -71,7 +90,16 @@
     "/api/v1/tokens/{tokenRef}/candles": {
       "get": {
         "operationId": "listTokenCandles",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "tokenRef",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -86,7 +114,40 @@
     "/api/v1/tokens/{tokenRef}/milestones": {
       "get": {
         "operationId": "listTokenMilestones",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "tokenRef",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/api/v1/tokens/{tokenRef}/revenue": {
+      "get": {
+        "operationId": "listTokenRevenueEvents",
+        "parameters": [
+          {
+            "name": "tokenRef",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -101,7 +162,16 @@
     "/api/v1/tokens/{tokenRef}": {
       "get": {
         "operationId": "getToken",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "tokenRef",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -116,7 +186,16 @@
     "/api/v1/profiles/{walletAddress}": {
       "get": {
         "operationId": "getProfile",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "walletAddress",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -129,7 +208,26 @@
       },
       "put": {
         "operationId": "updateProfile",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "walletAddress",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProfileDto"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": ""
@@ -144,7 +242,16 @@
     "/api/v1/profiles/{walletAddress}/tokens": {
       "get": {
         "operationId": "listProfileTokens",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "walletAddress",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -159,7 +266,16 @@
     "/api/v1/profiles/{walletAddress}/portfolio": {
       "get": {
         "operationId": "getProfilePortfolio",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "walletAddress",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -176,6 +292,14 @@
         "operationId": "createTokenComment",
         "parameters": [
           {
+            "name": "tokenRef",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "Idempotency-Key",
             "in": "header",
             "required": true,
@@ -184,6 +308,16 @@
             }
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCommentDto"
+              }
+            }
+          }
+        },
         "responses": {
           "201": {
             "description": ""
@@ -196,7 +330,16 @@
       },
       "get": {
         "operationId": "listTokenComments",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "tokenRef",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -211,7 +354,16 @@
     "/api/v1/comments/{id}": {
       "delete": {
         "operationId": "deleteComment",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -226,7 +378,16 @@
     "/api/v1/comments/{id}/replies": {
       "get": {
         "operationId": "listCommentReplies",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -241,7 +402,24 @@
     "/api/v1/comments/{id}/likes/{walletAddress}": {
       "get": {
         "operationId": "getCommentLikeStatus",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "walletAddress",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -254,7 +432,24 @@
       },
       "put": {
         "operationId": "likeComment",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "walletAddress",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -267,7 +462,24 @@
       },
       "delete": {
         "operationId": "unlikeComment",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "walletAddress",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -276,6 +488,373 @@
         "summary": "",
         "tags": [
           "comments"
+        ]
+      }
+    },
+    "/api/v1/launch/prepare": {
+      "post": {
+        "operationId": "prepareLaunch",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrepareLaunchDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "launch"
+        ]
+      }
+    },
+    "/api/v1/launch/relay": {
+      "post": {
+        "operationId": "relayLaunch",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RelayLaunchDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "launch"
+        ]
+      }
+    },
+    "/api/v1/launch/records/{launchId}": {
+      "get": {
+        "operationId": "getLaunchRecord",
+        "parameters": [
+          {
+            "name": "launchId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "launch"
+        ]
+      }
+    },
+    "/api/v1/launch/records": {
+      "get": {
+        "operationId": "listLaunchRecords",
+        "parameters": [
+          {
+            "name": "creator",
+            "required": false,
+            "in": "query",
+            "description": "Filter by creator wallet",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "required": false,
+            "in": "query",
+            "description": "Filter by state",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chainId",
+            "required": false,
+            "in": "query",
+            "description": "Chain id",
+            "schema": {
+              "default": 8453,
+              "type": "number"
+            }
+          },
+          {
+            "name": "page",
+            "required": false,
+            "in": "query",
+            "description": "Page number (1-based)",
+            "schema": {
+              "default": 1,
+              "type": "number"
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "description": "Page size",
+            "schema": {
+              "default": 20,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "launch"
+        ]
+      }
+    },
+    "/api/v1/tokens/{tokenRef}/price": {
+      "get": {
+        "operationId": "getTokenPrice",
+        "parameters": [
+          {
+            "name": "tokenRef",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "trading"
+        ]
+      }
+    },
+    "/api/v1/tokens/{tokenRef}/quote": {
+      "get": {
+        "operationId": "quoteTokenSwap",
+        "parameters": [
+          {
+            "name": "tokenRef",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "side",
+            "required": false,
+            "in": "query",
+            "description": "Direction: BUY (ETH in, token out) or SELL (token in, ETH out)",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "BUY",
+                "SELL"
+              ]
+            }
+          },
+          {
+            "name": "amount",
+            "required": false,
+            "in": "query",
+            "description": "Exact input amount (decimal string, token-wei for SELL, ETH-wei for BUY)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chainId",
+            "required": false,
+            "in": "query",
+            "description": "Chain id",
+            "schema": {
+              "default": 8453,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "trading"
+        ]
+      }
+    },
+    "/api/v1/tokens/{tokenRef}/depth": {
+      "get": {
+        "operationId": "getTokenDepth",
+        "parameters": [
+          {
+            "name": "tokenRef",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "buckets",
+            "required": false,
+            "in": "query",
+            "description": "Number of level buckets above spot (curve positions / band walls)",
+            "schema": {
+              "default": 8,
+              "type": "number"
+            }
+          },
+          {
+            "name": "chainId",
+            "required": false,
+            "in": "query",
+            "description": "Chain id",
+            "schema": {
+              "default": 8453,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "trading"
+        ]
+      }
+    },
+    "/api/v1/protocol/addresses": {
+      "get": {
+        "operationId": "getProtocolAddresses",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "protocol"
+        ]
+      }
+    },
+    "/api/v1/protocol/economics": {
+      "get": {
+        "operationId": "getEconomicConfig",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "protocol"
+        ]
+      }
+    },
+    "/api/v1/protocol/plugins": {
+      "get": {
+        "operationId": "listPayoutPlugins",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "protocol"
+        ]
+      }
+    },
+    "/api/v1/protocol/governance/operations": {
+      "get": {
+        "operationId": "listGovernanceOperations",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "protocol"
+        ]
+      }
+    },
+    "/api/v1/protocol/revenue": {
+      "get": {
+        "operationId": "getProtocolRevenue",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "protocol"
+        ]
+      }
+    },
+    "/api/v1/protocol/watermark": {
+      "get": {
+        "operationId": "getChainWatermark",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "protocol"
+        ]
+      }
+    },
+    "/api/v1/keepers/jobs": {
+      "get": {
+        "operationId": "listKeeperJobs",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "keepers"
         ]
       }
     }
@@ -289,6 +868,118 @@
   "tags": [],
   "servers": [],
   "components": {
-    "schemas": {}
+    "schemas": {
+      "CreateTokenDto": {
+        "type": "object",
+        "properties": {}
+      },
+      "UpdateProfileDto": {
+        "type": "object",
+        "properties": {}
+      },
+      "CreateCommentDto": {
+        "type": "object",
+        "properties": {}
+      },
+      "TokenSocialsDto": {
+        "type": "object",
+        "properties": {
+          "website": {
+            "type": "string",
+            "description": "HTTPS website URL",
+            "example": "https://example.com"
+          },
+          "x": {
+            "type": "string",
+            "description": "HTTPS X/Twitter URL"
+          },
+          "telegram": {
+            "type": "string",
+            "description": "HTTPS telegram URL"
+          },
+          "discord": {
+            "type": "string",
+            "description": "HTTPS discord URL"
+          }
+        }
+      },
+      "PrepareLaunchDto": {
+        "type": "object",
+        "properties": {
+          "creatorWalletAddress": {
+            "type": "string",
+            "description": "Declared creator; must equal the EIP-712 signer.",
+            "example": "0x…"
+          },
+          "name": {
+            "type": "string",
+            "description": "Token name",
+            "maxLength": 80
+          },
+          "symbol": {
+            "type": "string",
+            "description": "Token symbol",
+            "example": "SPWN",
+            "maxLength": 12
+          },
+          "description": {
+            "type": "string",
+            "description": "Token description",
+            "maxLength": 8000
+          },
+          "imageUri": {
+            "type": "string",
+            "description": "ipfs:// image URI (CIDv1)"
+          },
+          "socials": {
+            "$ref": "#/components/schemas/TokenSocialsDto"
+          },
+          "totalSupply": {
+            "type": "string",
+            "description": "Total supply in token-wei (decimal string)"
+          },
+          "devBuyShareWad": {
+            "type": "string",
+            "description": "Dev-buy share in WAD units (decimal string); hard cap 0.1e18"
+          },
+          "payoutPlan": {
+            "type": "string",
+            "description": "Payout plan bitset (decimal string); bit i selects registry index i"
+          },
+          "deadline": {
+            "type": "number",
+            "description": "Signature deadline (unix seconds)"
+          }
+        },
+        "required": [
+          "creatorWalletAddress",
+          "name",
+          "symbol",
+          "description",
+          "imageUri",
+          "totalSupply",
+          "devBuyShareWad",
+          "payoutPlan",
+          "deadline"
+        ]
+      },
+      "RelayLaunchDto": {
+        "type": "object",
+        "properties": {
+          "launchId": {
+            "type": "string",
+            "description": "UUID of the prepared launch record"
+          },
+          "signature": {
+            "type": "string",
+            "description": "65-byte EIP-712 signature over the LaunchConfig (hex)"
+          }
+        },
+        "required": [
+          "launchId",
+          "signature"
+        ]
+      }
+    }
   }
 }

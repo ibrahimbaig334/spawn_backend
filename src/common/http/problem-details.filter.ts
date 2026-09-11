@@ -45,7 +45,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     const requestId = request.id || randomUUID();
     const details = this.extractDetails(response);
 
-    if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
+    if (status >= 500) {
       const message = exception instanceof Error ? exception.message : 'Unknown error';
       this.logger.error(`${request.method} ${request.url} -> ${status}: ${message}`);
     }

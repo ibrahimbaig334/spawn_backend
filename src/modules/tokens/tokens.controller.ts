@@ -7,7 +7,11 @@ import { RATE_LIMIT_POLICIES } from '../../infrastructure/rate-limit/rate-limit.
 import { CreateTokenDto } from './dto/create-token.dto';
 import { TokenDetailQueryDto, TokenTradesQueryDto } from './dto/token-detail-query.dto';
 import { FeaturedTokensQueryDto, TokenListQueryDto } from './dto/token-list-query.dto';
-import { TokenCandlesQueryDto, TokenMilestonesQueryDto } from './dto/token-projection-query.dto';
+import {
+  TokenCandlesQueryDto,
+  TokenMilestonesQueryDto,
+  TokenRevenueQueryDto,
+} from './dto/token-projection-query.dto';
 import { FeaturedTokensService } from './featured-tokens.service';
 import { TokenCreationService } from './token-creation.service';
 import { TokenQueryService } from './token-query.service';
@@ -75,6 +79,15 @@ export class TokensController {
     @Query() query: TokenMilestonesQueryDto,
   ): Promise<unknown> {
     return this.queries.milestones(tokenRef, query);
+  }
+
+  @Get(':tokenRef/revenue')
+  @ApiOperation({ operationId: 'listTokenRevenueEvents' })
+  revenue(
+    @Param('tokenRef') tokenRef: string,
+    @Query() query: TokenRevenueQueryDto,
+  ): Promise<unknown> {
+    return this.queries.revenue(tokenRef, query);
   }
 
   @Get(':tokenRef')

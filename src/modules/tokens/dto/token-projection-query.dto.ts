@@ -56,6 +56,42 @@ export class TokenMilestonesQueryDto extends PaginationDto {
   chainId = 8453;
 }
 
+export const RevenueEventKinds = [
+  'CreatorAccrued',
+  'CreatorClaimed',
+  'CreatorPathAccrued',
+  'CreatorPathClaimed',
+  'CreatorPathClaimFailed',
+  'ProtocolAccrued',
+  'ProtocolClaimed',
+  'PayoutPotFunded',
+  'PayoutPotRedeemed',
+  'PayoutTipPaid',
+  'PluginPayoutDelivered',
+  'PluginPayoutCarried',
+  'PluginPayoutRedirected',
+  'FeesCollected',
+  'FeesRouted',
+  'Graduated',
+  'DevBuyExecuted',
+  'DevBuySkipped',
+] as const;
+
+export class TokenRevenueQueryDto extends PaginationDto {
+  @IsOptional()
+  @IsIn(RevenueEventKinds)
+  kind?: string;
+
+  @IsOptional()
+  @IsDateString({ strict: true })
+  from?: string;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  chainId = 8453;
+}
+
 function normalizeEnum(value: unknown): unknown {
   return typeof value === 'string' ? value.toUpperCase() : value;
 }

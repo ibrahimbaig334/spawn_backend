@@ -1,221 +1,141 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { ConflictException, Inject, Injectable } from '@nestjs/common';
-import { canonicalize } from 'json-canonicalize';
+import { Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { DeploymentSignerCustody } from '../../common/crypto/deployment-signer-custody';
+import { canonicalize } from 'json-canonicalize';
 import { DomainException } from '../../common/http/domain.exception';
-import { APP_ENVIRONMENT } from '../../config/config.constants';
-import type { Environment } from '../../config/environment';
+import { requestHash } from '../../common/crypto/request-hash';
 import { PrismaService } from '../../infrastructure/database/prisma.service';
-import type { CreateTokenDto } from './dto/create-token.dto';
 import {
   TOKEN_METADATA_STORAGE,
-  type MetadataUploadResult,
   type TokenMetadataStorage,
 } from './storage/token-metadata-storage';
 
+/**
+ * Offchain token registration: metadata upload + a tokens row keyed by creator.
+ *
+ * The on-chain launch is a separate, signed flow (see the launch module): the
+ * creator signs the EIP-712 LaunchConfig and either self-sends or relays through
+ * this backend. The indexer links the launched pool to an offchain row via the
+ * configHash — when a launch flows through `launch/prepare`, the prepared row is
+ * reused; a purely onchain launch gets a bare row created by the indexer.
+ *
+ * This endpoint exists so a token page, comments, and profiles can exist before
+ * (and independently of) the onchain launch.
+ */
+
+const SCOPE = 'POST:/api/v1/tokens';
+const IDEMPOTENCY_RETENTION_DAYS = 30;
+
+export interface CreateTokenInput {
+  creatorWalletAddress: string;
+  name: string;
+  symbol: string;
+  description: string;
+  imageUri: string;
+  socials?: { website?: string; x?: string; telegram?: string; discord?: string };
+}
+
 export interface CreatedToken {
   tokenId: string;
+  chainId: number;
   name: string;
   symbol: string;
   description: string;
   claimedCreatorWallet: string;
   imageUri: string;
-  socials: unknown;
+  socials: CreateTokenInput['socials'] | Prisma.JsonValue | null;
   ipfsUri: string;
   gatewayUrl: string;
-  deploymentSignerAddress: string;
   contractAddress: null;
   createdAt: Date;
 }
 
 @Injectable()
 export class TokenCreationService {
-  private readonly custody: DeploymentSignerCustody;
-
   constructor(
-    @Inject(PrismaService) private readonly prisma: PrismaService,
-    @Inject(TOKEN_METADATA_STORAGE) private readonly storage: TokenMetadataStorage,
-    @Inject(APP_ENVIRONMENT) environment: Environment,
-  ) {
-    if (!environment.encryptionKey || !environment.PRIVATE_KEY_ENCRYPTION_KEY_ID) {
-      throw new Error('Token creation requires deployment signer encryption configuration');
-    }
-    this.custody = new DeploymentSignerCustody(
-      environment.encryptionKey,
-      environment.PRIVATE_KEY_ENCRYPTION_KEY_ID,
-    );
-  }
+    private readonly prisma: PrismaService,
+    @Inject(TOKEN_METADATA_STORAGE) private readonly metadataStorage: TokenMetadataStorage,
+  ) {}
 
   async create(
-    input: CreateTokenDto,
+    input: CreateTokenInput,
     idempotencyKey: string,
   ): Promise<{ value: CreatedToken; replayed: boolean }> {
-    const requestHash = this.hash(input);
-    const reservation = await this.reserve(input, idempotencyKey, requestHash);
-    if (reservation) return reservation;
+    const creator = input.creatorWalletAddress.toLowerCase();
+    const requestHashValue = requestHash(canonicalize(input));
 
-    let uploaded: MetadataUploadResult;
+    const replay = await this.replay(creator, idempotencyKey, requestHashValue);
+    if (replay) return replay;
+
+    await this.reserve(creator, idempotencyKey, requestHashValue);
+
+    let metadata;
     try {
-      uploaded = await this.storage.upload({
+      metadata = await this.metadataStorage.upload({
         name: input.name,
         symbol: input.symbol,
         description: input.description,
         image: input.imageUri,
-        ...(input.socials ? { socials: input.socials } : {}),
+        socials: input.socials,
       });
-    } catch {
-      await this.releaseReservation(input, idempotencyKey, requestHash);
-      throw new DomainException(
-        503,
-        'METADATA_UPLOAD_FAILED',
-        'Token metadata could not be uploaded',
-      );
+    } catch (error) {
+      await this.releaseReservation(creator, idempotencyKey, requestHashValue);
+      throw new DomainException(503, 'METADATA_UPLOAD_FAILED', (error as Error).message);
     }
 
-    const tokenId = randomUUID();
-    const signer = this.custody.generate(tokenId);
+    const chainId = Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
+
     try {
-      await this.prisma.$transaction(
+      const tokenId = await this.prisma.$transaction(
         async (tx) => {
           await tx.profile.upsert({
-            where: { walletAddress: input.creatorWalletAddress },
-            create: { walletAddress: input.creatorWalletAddress },
+            where: { walletAddress: creator },
+            create: { walletAddress: creator },
             update: {},
           });
-          await tx.token.create({
+          const token = await tx.token.create({
             data: {
-              id: tokenId,
-              claimedCreatorWallet: input.creatorWalletAddress,
+              chainId,
+              claimedCreatorWallet: creator,
               name: input.name,
               symbol: input.symbol,
               description: input.description,
               imageUri: input.imageUri,
-              ipfsUri: uploaded.ipfsUri,
-              gatewayUrl: uploaded.gatewayUrl,
-              socials: input.socials ? { ...input.socials } : Prisma.JsonNull,
+              ipfsUri: metadata.ipfsUri,
+              gatewayUrl: metadata.gatewayUrl,
+              socials: (input.socials ?? Prisma.JsonNull) as Prisma.InputJsonValue,
             },
           });
-          await tx.tokenDeploymentSigner.create({
-            data: { tokenId, signerAddress: signer.signerAddress },
-          });
-          await tx.$executeRaw`
-            SELECT insert_token_deployment_secret(
-              ${tokenId}::uuid,
-              ${signer.version},
-              ${signer.algorithm}::varchar,
-              ${signer.keyId}::varchar,
-              ${signer.iv},
-              ${signer.ciphertext},
-              ${signer.authTag}
-            )
-          `;
-          const completed = await tx.idempotencyRequest.updateMany({
+          await tx.idempotencyRequest.update({
             where: {
-              scope: 'POST:/api/v1/tokens',
-              walletAddress: input.creatorWalletAddress,
-              key: idempotencyKey,
-              requestHash,
-              state: 'IN_PROGRESS',
+              scope_walletAddress_key: {
+                scope: SCOPE,
+                walletAddress: creator,
+                key: idempotencyKey,
+              },
             },
-            data: { state: 'COMPLETED', resourceId: tokenId, responseStatus: 201 },
+            data: { state: 'COMPLETED', responseStatus: 201, resourceId: token.id },
           });
-          if (completed.count !== 1) throw new Error('Token creation reservation was lost');
+          return token.id;
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       );
+
+      return { value: await this.findCreated(tokenId), replayed: false };
     } catch (error) {
-      await this.releaseReservation(input, idempotencyKey, requestHash);
+      if (this.isUniqueConstraintError(error)) {
+        const replayed = await this.replay(creator, idempotencyKey, requestHashValue);
+        if (replayed) return replayed;
+      }
       throw error;
-    } finally {
-      signer.iv.fill(0);
-      signer.ciphertext.fill(0);
-      signer.authTag.fill(0);
     }
-
-    return { value: await this.findCreated(tokenId), replayed: false };
-  }
-
-  private async reserve(
-    input: CreateTokenDto,
-    idempotencyKey: string,
-    requestHash: string,
-  ): Promise<{ value: CreatedToken; replayed: true } | null> {
-    const where = {
-      scope_walletAddress_key: {
-        scope: 'POST:/api/v1/tokens',
-        walletAddress: input.creatorWalletAddress,
-        key: idempotencyKey,
-      },
-    } as const;
-    const existing = await this.prisma.idempotencyRequest.findUnique({ where });
-    if (existing) return this.replay(existing, requestHash);
-
-    try {
-      await this.prisma.idempotencyRequest.create({
-        data: {
-          scope: 'POST:/api/v1/tokens',
-          walletAddress: input.creatorWalletAddress,
-          key: idempotencyKey,
-          requestHash,
-          expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1_000),
-        },
-      });
-      return null;
-    } catch (error) {
-      if (!isUniqueConstraintError(error)) throw error;
-      const raced = await this.prisma.idempotencyRequest.findUniqueOrThrow({ where });
-      return this.replay(raced, requestHash);
-    }
-  }
-
-  private async releaseReservation(
-    input: CreateTokenDto,
-    idempotencyKey: string,
-    requestHash: string,
-  ): Promise<void> {
-    await this.prisma.idempotencyRequest.deleteMany({
-      where: {
-        scope: 'POST:/api/v1/tokens',
-        walletAddress: input.creatorWalletAddress,
-        key: idempotencyKey,
-        requestHash,
-        state: 'IN_PROGRESS',
-      },
-    });
-  }
-
-  private async replay(
-    existing: { requestHash: string; resourceId: string | null },
-    requestHash: string,
-  ): Promise<{ value: CreatedToken; replayed: true }> {
-    if (existing.requestHash !== requestHash) {
-      throw new ConflictException({
-        code: 'IDEMPOTENCY_KEY_REUSED',
-        message: 'Idempotency-Key was already used with a different request',
-      });
-    }
-    if (!existing.resourceId) {
-      throw new ConflictException({
-        code: 'REQUEST_IN_PROGRESS',
-        message: 'Token creation is in progress',
-      });
-    }
-    return { value: await this.findCreated(existing.resourceId), replayed: true };
-  }
-
-  private hash(input: CreateTokenDto): string {
-    return `0x${createHash('sha256').update(canonicalize(input)).digest('hex')}`;
   }
 
   private async findCreated(tokenId: string): Promise<CreatedToken> {
-    const token = await this.prisma.token.findUniqueOrThrow({
-      where: { id: tokenId },
-      include: { deploymentSigner: true },
-    });
-    if (!token.deploymentSigner) throw new Error('Incomplete token record');
+    const token = await this.prisma.token.findUnique({ where: { id: tokenId } });
+    if (!token) throw new DomainException(500, 'INTERNAL_ERROR', 'token disappeared after create');
     return {
       tokenId: token.id,
+      chainId: token.chainId,
       name: token.name,
       symbol: token.symbol,
       description: token.description,
@@ -224,13 +144,73 @@ export class TokenCreationService {
       socials: token.socials,
       ipfsUri: token.ipfsUri,
       gatewayUrl: token.gatewayUrl,
-      deploymentSignerAddress: token.deploymentSigner.signerAddress,
       contractAddress: null,
       createdAt: token.createdAt,
     };
   }
-}
 
-function isUniqueConstraintError(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002';
+  private async reserve(
+    creator: string,
+    idempotencyKey: string,
+    requestHashValue: string,
+  ): Promise<void> {
+    await this.prisma.idempotencyRequest.create({
+      data: {
+        scope: SCOPE,
+        walletAddress: creator,
+        key: idempotencyKey,
+        requestHash: requestHashValue,
+        state: 'IN_PROGRESS',
+        expiresAt: new Date(Date.now() + IDEMPOTENCY_RETENTION_DAYS * 24 * 3600 * 1000),
+      },
+    });
+  }
+
+  private async releaseReservation(
+    creator: string,
+    idempotencyKey: string,
+    requestHashValue: string,
+  ): Promise<void> {
+    await this.prisma.idempotencyRequest.deleteMany({
+      where: {
+        scope: SCOPE,
+        walletAddress: creator,
+        key: idempotencyKey,
+        requestHash: requestHashValue,
+        state: 'IN_PROGRESS',
+      },
+    });
+  }
+
+  private async replay(
+    creator: string,
+    idempotencyKey: string,
+    requestHashValue: string,
+  ): Promise<{ value: CreatedToken; replayed: boolean } | null> {
+    const existing = await this.prisma.idempotencyRequest.findUnique({
+      where: {
+        scope_walletAddress_key: { scope: SCOPE, walletAddress: creator, key: idempotencyKey },
+      },
+    });
+    if (!existing) return null;
+    if (existing.requestHash !== requestHashValue) {
+      throw new DomainException(
+        409,
+        'IDEMPOTENCY_KEY_REUSED',
+        'this idempotency key was used with a different body',
+      );
+    }
+    if (existing.state !== 'COMPLETED' || !existing.resourceId) {
+      throw new DomainException(
+        409,
+        'REQUEST_IN_PROGRESS',
+        'a request with this idempotency key is already in flight',
+      );
+    }
+    return { value: await this.findCreated(existing.resourceId), replayed: true };
+  }
+
+  private isUniqueConstraintError(error: unknown): boolean {
+    return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+  }
 }

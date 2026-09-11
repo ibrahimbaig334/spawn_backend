@@ -29,7 +29,7 @@ async function generate(): Promise<void> {
   if (process.argv.includes('--check')) {
     const committed = await readFile(outputPath, 'utf8').catch(() => '');
     if (committed !== output) {
-      throw new Error('openapi.json is out of date; run pnpm openapi:generate');
+      throw new Error('openapi.json is out of date; run yarn openapi:generate');
     }
     return;
   }

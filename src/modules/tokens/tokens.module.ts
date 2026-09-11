@@ -14,6 +14,6 @@ import { TokensController } from './tokens.controller';
     FeaturedTokensService,
     { provide: TOKEN_METADATA_STORAGE, useClass: ThirdwebTokenMetadataStorage },
   ],
-  exports: [TokenCreationService, TokenQueryService],
+  exports: [TokenCreationService, TokenQueryService, TOKEN_METADATA_STORAGE],
 })
 export class TokensModule {}

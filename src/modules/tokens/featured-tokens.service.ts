@@ -29,10 +29,12 @@ interface FeaturedCandidate {
     contractAddress: string;
     poolId: string;
     completedCoreMilestones: number;
-    completedExtraMilestones: number;
+    completedExtensionMilestones: number;
   };
-  volume: Prisma.Decimal | null;
-  marketCap: Prisma.Decimal | null;
+  volumeUsd: Prisma.Decimal | null;
+  volumeEth: Prisma.Decimal | null;
+  marketCapUsd: Prisma.Decimal | null;
+  marketCapEth: Prisma.Decimal | null;
   tradeCount: bigint | null;
   holderCount: bigint | null;
 }
@@ -59,15 +61,14 @@ export class FeaturedTokensService {
         if (!watermark || Date.now() - watermark.blockTime.getTime() > this.staleAfterMs) return [];
         const rows = await tx.token.findMany({
           where: {
-            projections: {
-              some: { chainId, projectionVersion: { lte: watermark.committedVersion } },
+            chainId,
+            projection: {
+              chainId,
+              projectionVersion: { lte: watermark.committedVersion },
             },
           },
           include: {
-            projections: {
-              where: { chainId, projectionVersion: { lte: watermark.committedVersion } },
-              take: 1,
-            },
+            projection: true,
             metrics: {
               where: {
                 chainId,
@@ -79,8 +80,8 @@ export class FeaturedTokensService {
           },
         });
         const candidates: FeaturedCandidate[] = rows.flatMap((row) => {
-          const chain = row.projections[0];
-          if (!chain) return [];
+          const state = row.projection;
+          if (!state) return [];
           const metric = row.metrics[0];
           return [
             {
@@ -89,9 +90,17 @@ export class FeaturedTokensService {
               symbol: row.symbol,
               imageUri: row.imageUri,
               claimedCreatorWallet: row.claimedCreatorWallet,
-              chain,
-              volume: metric?.volumeUsd ?? null,
-              marketCap: metric?.marketCapUsd ?? null,
+              chain: {
+                phase: state.phase,
+                contractAddress: state.contractAddress,
+                poolId: state.poolId,
+                completedCoreMilestones: state.completedMilestones,
+                completedExtensionMilestones: state.completedExtensionMilestones,
+              },
+              volumeUsd: metric?.volumeUsd ?? null,
+              volumeEth: metric?.volumeEth ?? null,
+              marketCapUsd: metric?.marketCapUsd ?? null,
+              marketCapEth: metric?.marketCapEth ?? null,
               tradeCount: metric?.tradeCount ?? null,
               holderCount: metric?.holderCount ?? null,
             },
@@ -115,13 +124,17 @@ export class FeaturedTokensService {
   }
 
   private rank(candidate: FeaturedCandidate, population: FeaturedCandidate[]): RankedToken {
-    const volume = percentile(candidate, population, (item) => item.volume);
-    const marketCap = percentile(candidate, population, (item) => item.marketCap);
+    const volume = percentile(candidate, population, (item) => item.volumeUsd ?? item.volumeEth);
+    const marketCap = percentile(
+      candidate,
+      population,
+      (item) => item.marketCapUsd ?? item.marketCapEth,
+    );
     const trades = percentile(candidate, population, (item) => item.tradeCount);
     const holders = percentile(candidate, population, (item) => item.holderCount);
     const progress = Math.min(
       1,
-      (candidate.chain.completedCoreMilestones + candidate.chain.completedExtraMilestones) / 60,
+      (candidate.chain.completedCoreMilestones + candidate.chain.completedExtensionMilestones) / 60,
     );
     const featuredScore = Math.round(
       1_000_000 *
@@ -137,8 +150,8 @@ export class FeaturedTokensService {
       onchain: candidate.chain,
       metrics: {
         timeframe: Timeframe.H24,
-        volumeUsd: candidate.volume,
-        marketCapUsd: candidate.marketCap,
+        volumeUsd: candidate.volumeUsd,
+        marketCapUsd: candidate.marketCapUsd,
         tradeCount: candidate.tradeCount,
         holderCount: candidate.holderCount,
       },

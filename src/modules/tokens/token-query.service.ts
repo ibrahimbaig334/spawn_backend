@@ -20,8 +20,10 @@ import {
   PRISMA_CANDLE_INTERVALS,
   type TokenCandlesQueryDto,
   type TokenMilestonesQueryDto,
+  type TokenRevenueQueryDto,
 } from './dto/token-projection-query.dto';
 import { timeframeStart, toPrismaTimeframe } from './dto/query-values';
+import { tokenPriceEthString } from '../../protocol/protocol-math';
 
 interface TokenListItem {
   tokenId: string;
@@ -80,12 +82,11 @@ export class TokenQueryService {
         const tokens = await tx.token.findMany({
           where: { id: { in: page.ids } },
           include: {
-            projections: {
+            projection: {
               where: {
                 chainId: query.chainId,
                 projectionVersion: { lte: watermark?.committedVersion ?? -1n },
               },
-              take: 1,
             },
             metrics: {
               where: {
@@ -101,7 +102,7 @@ export class TokenQueryService {
         const data = page.ids.flatMap((id) => {
           const token = byId.get(id);
           if (!token) return [];
-          return [this.listItem(token, token.projections[0] ?? null, token.metrics[0] ?? null)];
+          return [this.listItem(token, token.projection, token.metrics[0] ?? null)];
         });
         return { data, meta: pageMeta(query.page, query.limit, page.total) };
       },
@@ -172,10 +173,10 @@ export class TokenQueryService {
     if (query.sort === 'oldest') return Prisma.sql`t."createdAt" ASC, t.id ASC`;
     if (query.sort === 'newest') return Prisma.sql`t."createdAt" DESC, t.id ASC`;
     if (query.sort === 'market_cap') {
-      return Prisma.sql`tm."marketCapUsd" DESC NULLS LAST, t."createdAt" DESC, t.id ASC`;
+      return Prisma.sql`COALESCE(tm."marketCapUsd", tm."marketCapEth") DESC NULLS LAST, t."createdAt" DESC, t.id ASC`;
     }
     if (query.sort === 'volume') {
-      return Prisma.sql`tm."volumeUsd" DESC NULLS LAST, t."createdAt" DESC, t.id ASC`;
+      return Prisma.sql`COALESCE(tm."volumeUsd", tm."volumeEth") DESC NULLS LAST, t."createdAt" DESC, t.id ASC`;
     }
     if (query.sort === 'graduated') {
       return Prisma.sql`CASE cs.phase
@@ -275,8 +276,9 @@ export class TokenQueryService {
           imageUri: token.imageUri,
           claimedCreatorWallet: token.claimedCreatorWallet,
           creatorProfile: token.creator,
-          deploymentSignerAddress: token.deploymentSigner?.signerAddress ?? null,
-          deploymentBinding: token.deploymentBinding,
+          launchRecord: token.launchRecord
+            ? { launchId: token.launchRecord.id, state: token.launchRecord.state }
+            : null,
           ipfsUri: token.ipfsUri,
           gatewayUrl: token.gatewayUrl,
           socials: token.socials,
@@ -396,6 +398,38 @@ export class TokenQueryService {
     return result;
   }
 
+  async revenue(tokenRef: string, query: TokenRevenueQueryDto): Promise<PageResult<unknown>> {
+    const key = this.cacheKey(`tokens:revenue:${tokenRef.toLowerCase()}`, query);
+    const cached = await this.cache.get<PageResult<unknown>>(key);
+    if (cached) return cached;
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        const token = await this.resolveToken(tx, tokenRef, query.chainId);
+        const watermark = await tx.chainWatermark.findUnique({ where: { chainId: query.chainId } });
+        if (!watermark) return { data: [], meta: pageMeta(query.page, query.limit, 0) };
+        const where: Prisma.RevenueEventWhereInput = {
+          tokenId: token.id,
+          chainId: query.chainId,
+          ...(query.kind ? { kind: query.kind } : {}),
+          ...(query.from ? { blockTime: { gte: new Date(query.from) } } : {}),
+        };
+        const [total, data] = await Promise.all([
+          tx.revenueEvent.count({ where }),
+          tx.revenueEvent.findMany({
+            where,
+            orderBy: [{ blockNumber: 'desc' }, { logIndex: 'desc' }],
+            skip: query.skip,
+            take: query.limit,
+          }),
+        ]);
+        return { data, meta: pageMeta(query.page, query.limit, total) };
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    );
+    await this.cache.set(key, result, { ttlSeconds: CACHE_TTL_SECONDS.trades });
+    return result;
+  }
+
   private async findTrades(
     tx: Prisma.TransactionClient,
     tokenId: string,
@@ -415,7 +449,6 @@ export class TokenQueryService {
     const where: Prisma.TradeWhereInput = {
       tokenId,
       chainId: query.chainId,
-      canonical: true,
       ...(query.side ? { side: query.side } : {}),
       ...(start ? { blockTime: { gte: start } } : {}),
       projectionVersion: { lte: watermark.committedVersion },
@@ -448,8 +481,7 @@ export class TokenQueryService {
     Prisma.TokenGetPayload<{
       include: {
         creator: true;
-        deploymentSigner: true;
-        deploymentBinding: true;
+        launchRecord: true;
       };
     }>
   > {
@@ -464,20 +496,18 @@ export class TokenQueryService {
     }
     const token = await tx.token.findFirst({
       where: uuidReference
-        ? { id: normalized }
+        ? { id: normalized, chainId }
         : {
-            projections: {
-              some: {
-                chainId,
-                contractAddress: normalized,
-                projectionVersion: { lte: committedVersion },
-              },
+            chainId,
+            projection: {
+              chainId,
+              contractAddress: normalized,
+              projectionVersion: { lte: committedVersion },
             },
           },
       include: {
         creator: true,
-        deploymentSigner: true,
-        deploymentBinding: true,
+        launchRecord: true,
       },
     });
     if (!token) throw new NotFoundException({ code: 'TOKEN_NOT_FOUND' });
@@ -521,6 +551,7 @@ export class TokenQueryService {
   }
 
   private chainPresenter(chain: TokenChainState): Record<string, unknown> {
+    const level = chain.lastPriceLevel ?? chain.openingLevel;
     return {
       chainId: chain.chainId,
       phase: chain.phase,
@@ -530,35 +561,49 @@ export class TokenQueryService {
       creatorRevenueNftId: chain.creatorRevenueNftId,
       creatorRevenueOwner: chain.creatorRevenueOwner,
       totalSupply: chain.totalSupply,
+      currentSupply: chain.currentSupply,
       decimals: chain.decimals,
+      openingLevel: chain.openingLevel,
+      farLevel: chain.farLevel,
+      graduationLevel: chain.graduationLevel,
+      payoutPlan: chain.payoutPlan,
+      devBuyShareWad: chain.devBuyShareWad,
+      configHash: chain.configHash,
       allocationsBps: {
-        curve: chain.curveAllocationBps,
-        milestones: chain.milestoneAllocationBps,
-        fullRange: chain.fullRangeAllocationBps,
+        curve: chain.curveSupplyShareBps,
+        milestones: chain.ladderSupplyShareBps,
+        fullRange: chain.fullRangeSupplyShareBps,
       },
-      harvestSplitWad: {
-        creator: chain.creatorHarvestSplitWad,
-        buyback: chain.buybackHarvestSplitWad,
-        protocol: chain.protocolHarvestSplitWad,
-        lp: chain.lpHarvestSplitWad,
-      },
-      curveCount: chain.curveCount,
-      completedCoreMilestones: chain.completedCoreMilestones,
-      completedExtensionMilestones: chain.completedExtraMilestones,
-      feeBps: chain.feeBps,
+      curvePositions: chain.curvePositions,
+      curveDeployed: chain.curveDeployed,
+      coreBandCount: chain.coreBandCount,
+      completedMilestones: chain.completedMilestones,
+      completedExtensionMilestones: chain.completedExtensionMilestones,
+      feeFundedBandsCreated: chain.feeFundedBandsCreated,
+      payoutPotWei: chain.payoutPot,
+      directCreatorClaimableWei: chain.directCreatorClaimable,
+      creatorPathClaimableWei: chain.creatorPathClaimable,
+      carriedInventoryWei: chain.carriedInventory,
+      milestoneFundAccruedWei: chain.milestoneFundAccrued,
+      lastPriceLevel: chain.lastPriceLevel,
+      priceEthPerToken: tokenPriceEthString(level, chain.decimals),
+      launchedAt: chain.launchedAt,
+      graduatedAt: chain.graduatedAt,
       projectionVersion: chain.projectionVersion,
       sourceBlockNumber: chain.sourceBlockNumber,
       sourceBlockHash: chain.sourceBlockHash,
       sourceBlockTime: chain.sourceBlockTime,
-      provenance: chain.provenance,
     };
   }
 
   private metricPresenter(metric: TokenMetric): Record<string, unknown> {
     return {
       timeframe: metric.timeframe,
+      priceEth: metric.priceEth,
       priceUsd: metric.priceUsd,
+      marketCapEth: metric.marketCapEth,
       marketCapUsd: metric.marketCapUsd,
+      volumeEth: metric.volumeEth,
       volumeUsd: metric.volumeUsd,
       priceChangePct: metric.priceChangePct,
       tradeCount: metric.tradeCount,
@@ -574,16 +619,23 @@ export class TokenQueryService {
   ): Record<string, unknown> {
     const total = (kind: MilestoneKind): number =>
       rows.filter((row) => row.kind === kind).reduce((sum, row) => sum + row._count, 0);
-    const completed = (kind: MilestoneKind): number =>
+    const harvested = (kind: MilestoneKind): number =>
       rows
-        .filter(
-          (row) => row.kind === kind && (row.state === 'COMPLETED' || row.state === 'HARVESTED'),
-        )
+        .filter((row) => row.kind === kind && row.state === 'HARVESTED')
+        .reduce((sum, row) => sum + row._count, 0);
+    const deployed = (kind: MilestoneKind): number =>
+      rows
+        .filter((row) => row.kind === kind && row.state === 'DEPLOYED')
         .reduce((sum, row) => sum + row._count, 0);
     return {
-      core: { completed: completed(MilestoneKind.CORE), total: total(MilestoneKind.CORE) },
+      core: {
+        harvested: harvested(MilestoneKind.CORE),
+        deployed: deployed(MilestoneKind.CORE),
+        total: total(MilestoneKind.CORE),
+      },
       extension: {
-        completed: completed(MilestoneKind.EXTENSION),
+        harvested: harvested(MilestoneKind.EXTENSION),
+        deployed: deployed(MilestoneKind.EXTENSION),
         total: total(MilestoneKind.EXTENSION),
       },
     };
