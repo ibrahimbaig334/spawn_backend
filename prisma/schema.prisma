@@ -7,15 +7,9 @@ datasource db {
   provider = "postgresql"
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Enums
-// ---------------------------------------------------------------------------
-
-enum OnchainPhase {
-  NONE
-  BONDING_CURVE
-  GRADUATED
-}
+// ===========================================================================
 
 enum Timeframe {
   H1
@@ -25,30 +19,21 @@ enum Timeframe {
   ALL
 }
 
-enum TradeSide {
-  BUY
-  SELL
+enum PoolStatus {
+  bonding
+  graduated
 }
 
-enum CandleInterval {
-  M1
-  M5
-  M15
-  H1
-  H4
-  D1
+enum BandStatus {
+  live
+  completed
 }
 
-enum MilestoneKind {
-  CORE
-  EXTENSION
-}
-
-enum MilestoneState {
-  PENDING
-  DEPLOYED
-  SKIPPED
-  HARVESTED
+enum PluginRole {
+  INVALID
+  PAYOUT
+  CREATOR_SYSTEM
+  UTILITY
 }
 
 enum AccrualSource {
@@ -58,9 +43,15 @@ enum AccrualSource {
 }
 
 enum PayoutOutcome {
-  DELIVERED
-  CARRIED
-  REDIRECTED
+  delivered
+  carried
+  redirected
+}
+
+enum ClaimType {
+  creator
+  creatorPath
+  protocol
 }
 
 enum GovernanceAction {
@@ -69,6 +60,7 @@ enum GovernanceAction {
   REGISTER_PLUGIN
   SET_PLUGIN_SUSPENDED
   SET_GOVERNANCE_DELAY
+  SET_TRUSTED_OPERATOR
 }
 
 enum GovernanceStatus {
@@ -83,31 +75,31 @@ enum IdempotencyState {
   FAILED
 }
 
-enum LaunchMode {
-  CREATOR_DIRECT
-  RELAYED
-}
-
 enum LaunchRecordState {
-  PENDING_SIGNATURE
+  PENDING_RELAY
   SUBMITTED
   CONFIRMED
   REORGED
   FAILED
 }
 
-// ---------------------------------------------------------------------------
-// Offchain domain (API-owned)
-// ---------------------------------------------------------------------------
+enum TokenSource {
+  API
+  INDEXER
+}
+
+// ===========================================================================
+// API-owned tables
+// ===========================================================================
 
 model Profile {
-  walletAddress  String        @id @db.VarChar(42)
-  username       String?       @unique @db.VarChar(32)
-  usernameFolded String?       @unique @db.VarChar(32)
-  bio            String?       @db.VarChar(1200)
-  imageUri       String?       @db.VarChar(512)
-  createdAt      DateTime      @default(now()) @db.Timestamptz(6)
-  updatedAt      DateTime      @updatedAt @db.Timestamptz(6)
+  walletAddress  String      @id @db.VarChar(42)
+  username       String?     @unique @db.VarChar(32)
+  usernameFolded String?     @unique @db.VarChar(32)
+  bio            String?     @db.VarChar(1200)
+  imageUri       String?     @db.VarChar(512)
+  createdAt      DateTime    @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime    @updatedAt @db.Timestamptz(6)
   tokens         Token[]
   comments       Comment[]
   commentLikes   CommentLike[]
@@ -115,64 +107,67 @@ model Profile {
   @@map("profiles")
 }
 
+// The state table `tokens` per the backend guide (ERC-20 metadata from Launched)
+// extended with the offchain registration fields the API owns.
 model Token {
-  id                   String               @id @default(uuid()) @db.Uuid
-  chainId              Int
-  claimedCreatorWallet  String               @db.VarChar(42)
-  name                 String               @db.VarChar(320)
-  symbol               String               @db.VarChar(12)
-  description          String               @db.VarChar(8000)
-  imageUri             String               @db.VarChar(512)
-  ipfsUri              String               @db.VarChar(512)
-  gatewayUrl           String               @db.VarChar(2048)
+  id                   String      @id @default(uuid()) @db.Uuid
+  chainId              Int         @default(8453) @map("chain_id")
+  token                String?     @db.VarChar(42)
+  name                 String      @db.VarChar(320)
+  symbol               String      @db.VarChar(12)
+  uri                  String      @default("") @db.VarChar(2048)
+  description          String?     @db.VarChar(8000)
+  imageUri             String?     @db.VarChar(512)
+  ipfsUri              String?     @db.VarChar(512)
+  gatewayUrl           String?     @db.VarChar(2048)
   socials              Json?
-  configHash           String?              @db.VarChar(66)
-  createdAt            DateTime             @default(now()) @db.Timestamptz(6)
-  updatedAt            DateTime             @updatedAt @db.Timestamptz(6)
-  creator              Profile              @relation(fields: [claimedCreatorWallet], references: [walletAddress])
-  projection           TokenChainState?
-  metrics              TokenMetric[]
-  trades               Trade[]
-  candles              Candle[]
-  milestones           Milestone[]
-  holdings             Holding[]
-  revenueEvents        RevenueEvent[]
-  comments             Comment[]
+  claimedCreatorWallet String?     @db.VarChar(42)
+  source               TokenSource @default(INDEXER)
+  createdAt            DateTime    @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime    @updatedAt @db.Timestamptz(6)
+  creator              Profile?    @relation(fields: [claimedCreatorWallet], references: [walletAddress])
+  pool                 Pool?
   launchRecord         LaunchRecord?
+  comments             Comment[]
 
-  @@unique([chainId, configHash])
+  @@unique([chainId, token])
   @@index([claimedCreatorWallet, createdAt(sort: Desc)])
   @@index([createdAt(sort: Desc)])
   @@map("tokens")
 }
 
 model LaunchRecord {
-  id                   String            @id @default(uuid()) @db.Uuid
-  chainId              Int
-  creatorWallet        String            @db.VarChar(42)
-  name                 String            @db.VarChar(320)
-  symbol               String            @db.VarChar(12)
-  totalSupply          Decimal           @db.Decimal(78, 0)
-  devBuyShareWad       Decimal           @db.Decimal(38, 18)
-  payoutPlan           Decimal           @db.Decimal(78, 0)
-  deadline             BigInt
-  configHash           String            @db.VarChar(66)
-  predictedToken       String            @db.VarChar(42)
-  signature            String?
-  digest               String            @db.VarChar(66)
-  mode                 LaunchMode
-  state                LaunchRecordState @default(PENDING_SIGNATURE)
-  transactionHash      String?           @db.VarChar(66)
-  submittedAt          DateTime?         @db.Timestamptz(6)
-  confirmedAt          DateTime?         @db.Timestamptz(6)
-  blockNumber          BigInt?
-  failureReason       String?           @db.VarChar(1000)
-  tokenId              String?           @unique @db.Uuid
-  createdAt            DateTime          @default(now()) @db.Timestamptz(6)
-  updatedAt            DateTime          @updatedAt @db.Timestamptz(6)
-  token                Token?            @relation(fields: [tokenId], references: [id], onDelete: SetNull)
+  id              String            @id @default(uuid()) @db.Uuid
+  chainId         Int
+  creatorWallet   String            @db.VarChar(42)
+  name            String            @db.VarChar(320)
+  symbol          String            @db.VarChar(12)
+  uri             String            @db.VarChar(2048)
+  description     String            @db.VarChar(8000)
+  imageUri        String            @db.VarChar(512)
+  ipfsUri         String?           @db.VarChar(512)
+  gatewayUrl      String?           @db.VarChar(2048)
+  socials         Json?
+  totalSupply     Decimal           @db.Decimal(78, 0)
+  devBuyShareWad  Decimal           @db.Decimal(38, 18)
+  payoutPlan      Decimal           @db.Decimal(78, 0)
+  deadline        BigInt
+  configHash      String            @db.VarChar(66)
+  predictedToken  String            @db.VarChar(42)
+  digest          String            @db.VarChar(66)
+  state           LaunchRecordState @default(PENDING_RELAY)
+  transactionHash String?           @db.VarChar(66)
+  blockNumber     BigInt?
+  submittedAt     DateTime?         @db.Timestamptz(6)
+  confirmedAt     DateTime?         @db.Timestamptz(6)
+  failureReason   String?           @db.VarChar(1000)
+  tokenDbId       String?           @db.Uuid
+  createdAt       DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime          @updatedAt @db.Timestamptz(6)
+  token           Token?            @relation(fields: [tokenDbId], references: [id])
 
   @@unique([chainId, configHash, creatorWallet])
+  @@unique([tokenDbId])
   @@index([creatorWallet, state])
   @@index([state, createdAt])
   @@map("launch_records")
@@ -223,341 +218,9 @@ model DomainGeneration {
   @@map("domain_generations")
 }
 
-// ---------------------------------------------------------------------------
-// Indexer ledger: blocks, manifests, raw event log
-// ---------------------------------------------------------------------------
-
-model DeploymentManifest {
-  chainId   Int      @id
-  document  Json
-  syncedAt  DateTime @updatedAt @db.Timestamptz(6)
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
-
-  @@map("deployment_manifests")
-}
-
-model ChainCursor {
-  chainId          Int      @id
-  // Lowest unprocessed block height (exclusive): ingest blocks >= this.
-  nextBlock        BigInt
-  // Head block already ingested (inclusive).
-  headBlock        BigInt
-  headBlockHash    String   @db.VarChar(66)
-  headBlockTime    DateTime @db.Timestamptz(6)
-  // Number of blocks behind a reorg triggers rollback (Base finality ~ minutes).
-  safeDepth        Int      @default(64)
-  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
-
-  @@map("chain_cursors")
-}
-
-model BlockReceipt {
-  chainId       Int
-  blockNumber   BigInt
-  blockHash     String   @db.VarChar(66)
-  blockTime     DateTime @db.Timestamptz(6)
-  parentHash    String   @db.VarChar(66)
-  transactionCount Int
-  // Projection monotonic version stamped on rows written while this block was head.
-  version       BigInt
-  ingestedAt    DateTime @default(now()) @db.Timestamptz(6)
-
-  @@id([chainId, blockNumber])
-  @@map("block_receipts")
-}
-
-model RawChainEvent {
-  chainId         Int
-  blockNumber     BigInt
-  logIndex        Int
-  transactionIndex Int
-  transactionHash String         @db.VarChar(66)
-  address         String         @db.VarChar(42)
-  topic0          String         @db.VarChar(66)
-  topics          String[]       @db.VarChar(66)
-  data            String         @db.VarChar(8192)
-  eventName       String?        @db.VarChar(64)
-  blockHash       String         @db.VarChar(66)
-  blockTime       DateTime       @db.Timestamptz(6)
-
-  @@id([chainId, blockNumber, logIndex])
-  @@index([address, topic0, blockNumber])
-  @@index([chainId, blockNumber(sort: Desc), logIndex(sort: Desc)])
-  @@map("raw_chain_events")
-}
-
-// ---------------------------------------------------------------------------
-// Onchain projections (indexer-owned, watermark-gated reads)
-// ---------------------------------------------------------------------------
-
-model ChainWatermark {
-  chainId          Int      @id
-  committedVersion BigInt
-  blockNumber      BigInt
-  blockHash        String   @db.VarChar(66)
-  blockTime        DateTime @db.Timestamptz(6)
-  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
-
-  @@map("chain_watermarks")
-}
-
-model EconomicConfigRecord {
-  chainId               Int      @id
-  version               BigInt
-  harvestServiceFeeWad  Decimal  @db.Decimal(38, 18)
-  quoteCreatorShareWad  Decimal  @db.Decimal(38, 18)
-  tokenMilestoneFundShareWad Decimal @db.Decimal(38, 18)
-  activatedAtBlock      BigInt
-  blockTime             DateTime @db.Timestamptz(6)
-  updatedAt             DateTime @updatedAt @db.Timestamptz(6)
-
-  @@map("economic_config_records")
-}
-
-model PluginRegistryEntry {
-  chainId    Int
-  index      Int
-  plugin     String   @db.VarChar(42)
-  takeWad    Decimal  @db.Decimal(38, 18)
-  gasLimit   Int
-  codeHash   String   @db.VarChar(66)
-  role       Int
-  suspended  Boolean  @default(false)
-  registeredAtBlock BigInt
-  blockTime  DateTime @db.Timestamptz(6)
-
-  @@id([chainId, index])
-  @@index([chainId, plugin])
-  @@map("plugin_registry_entries")
-}
-
-model GovernanceOperation {
-  chainId      Int
-  operationId  String            @db.VarChar(66)
-  action       GovernanceAction
-  payload      Json
-  status       GovernanceStatus  @default(SCHEDULED)
-  readyAtBlock BigInt?
-  readyAt      DateTime?         @db.Timestamptz(6)
-  executedAtBlock BigInt?
-  cancelledAtBlock BigInt?
-  blockTime    DateTime          @db.Timestamptz(6)
-
-  @@id([chainId, operationId])
-  @@index([chainId, status])
-  @@map("governance_operations")
-}
-
-model TokenChainState {
-  tokenId                  String       @id @db.Uuid
-  chainId                  Int
-  phase                    OnchainPhase
-  contractAddress          String       @db.VarChar(42)
-  poolId                   String       @db.VarChar(66)
-  launchCreatorWallet      String       @db.VarChar(42)
-  creatorRevenueNftId      Decimal?     @db.Decimal(78, 0)
-  creatorRevenueOwner      String?      @db.VarChar(42)
-  revenueNftMintedAt       DateTime?    @db.Timestamptz(6)
-  launchedAt               DateTime     @db.Timestamptz(6)
-  graduatedAt              DateTime?    @db.Timestamptz(6)
-  totalSupply              Decimal      @db.Decimal(78, 0)
-  currentSupply            Decimal      @db.Decimal(78, 0)
-  decimals                 Int
-  openingLevel             Int
-  farLevel                 Int
-  graduationLevel          Int?
-  payoutPlan               Decimal      @db.Decimal(78, 0)
-  devBuyShareWad           Decimal      @db.Decimal(38, 18)
-  configHash               String      @db.VarChar(66)
-  curveSupplyShareBps      Int          @default(2500)
-  ladderSupplyShareBps     Int          @default(6500)
-  fullRangeSupplyShareBps  Int          @default(1000)
-  curvePositions           Int          @default(32)
-  curveDeployed            Int          @default(0)
-  coreBandCount            Int          @default(30)
-  maxFeeFundedBands        Int          @default(30)
-  deployedBands            Decimal      @default(0) @db.Decimal(78, 0)
-  completedBands           Decimal      @default(0) @db.Decimal(78, 0)
-  completedMilestones       Int          @default(0)
-  completedExtensionMilestones Int      @default(0)
-  feeFundedBandsCreated    Int          @default(0)
-  bandLevelSpacing         Int          @default(2235)
-  bandWidthLevels          Int          @default(447)
-  carriedInventory         Decimal      @default(0) @db.Decimal(78, 0)
-  milestoneFundAccrued     Decimal      @default(0) @db.Decimal(78, 0)
-  payoutPot                Decimal      @default(0) @db.Decimal(78, 0)
-  payoutPotFundedCount     Int          @default(0)
-  directCreatorClaimable   Decimal      @default(0) @db.Decimal(78, 0)
-  creatorPathClaimable     Decimal      @default(0) @db.Decimal(78, 0)
-  pluginCarryBitmap        Decimal      @default(0) @db.Decimal(78, 0)
-  lastPriceLevel           Int?
-  lastSqrtPriceX96         Decimal?     @db.Decimal(78, 0)
-  projectionVersion        BigInt
-  sourceBlockNumber        BigInt
-  sourceBlockHash          String      @db.VarChar(66)
-  sourceBlockTime          DateTime    @db.Timestamptz(6)
-  updatedAt                DateTime    @updatedAt @db.Timestamptz(6)
-  token                    Token       @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-
-  @@unique([chainId, contractAddress])
-  @@unique([chainId, poolId])
-  @@index([phase, sourceBlockTime])
-  @@index([chainId, launchCreatorWallet])
-  @@map("token_chain_states")
-}
-
-model TokenMetric {
-  tokenId           String    @db.Uuid
-  chainId           Int
-  timeframe         Timeframe
-  priceEth          Decimal?  @db.Decimal(100, 36)
-  priceUsd          Decimal?  @db.Decimal(100, 36)
-  marketCapEth      Decimal?  @db.Decimal(100, 36)
-  marketCapUsd      Decimal?  @db.Decimal(100, 36)
-  volumeEth         Decimal?  @db.Decimal(100, 36)
-  volumeUsd         Decimal?  @db.Decimal(100, 36)
-  priceChangePct    Decimal?  @db.Decimal(38, 18)
-  tradeCount        BigInt?
-  holderCount       BigInt?
-  projectionVersion BigInt
-  sourceBlockNumber BigInt
-  sourceBlockTime   DateTime  @db.Timestamptz(6)
-  updatedAt         DateTime  @updatedAt @db.Timestamptz(6)
-  token             Token     @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-
-  @@id([tokenId, chainId, timeframe])
-  @@index([timeframe, volumeUsd(sort: Desc)])
-  @@index([timeframe, marketCapUsd(sort: Desc)])
-  @@map("token_metrics")
-}
-
-model Trade {
-  chainId           Int
-  transactionHash   String    @db.VarChar(66)
-  logIndex          Int
-  transactionIndex  Int
-  tokenId           String    @db.Uuid
-  side              TradeSide
-  traderWallet      String    @db.VarChar(42)
-  tokenAmountRaw    Decimal   @db.Decimal(78, 0)
-  quoteAmountRaw    Decimal   @db.Decimal(78, 0)
-  priceLevel        Int
-  sqrtPriceX96      Decimal   @db.Decimal(78, 0)
-  priceUsd          Decimal?  @db.Decimal(100, 36)
-  valueUsd          Decimal?  @db.Decimal(100, 36)
-  lpFee             Int
-  blockNumber       BigInt
-  blockHash         String    @db.VarChar(66)
-  blockTime         DateTime  @db.Timestamptz(6)
-  projectionVersion BigInt
-  token             Token     @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-
-  @@id([chainId, transactionHash, logIndex])
-  @@index([tokenId, chainId, blockNumber(sort: Desc), transactionIndex(sort: Desc), logIndex(sort: Desc)])
-  @@index([tokenId, chainId, tokenAmountRaw(sort: Desc)])
-  @@map("trades")
-}
-
-model Candle {
-  tokenId           String         @db.Uuid
-  chainId           Int
-  interval          CandleInterval
-  bucketStart       DateTime       @db.Timestamptz(6)
-  open              Decimal        @db.Decimal(100, 36)
-  high              Decimal        @db.Decimal(100, 36)
-  low               Decimal        @db.Decimal(100, 36)
-  close             Decimal        @db.Decimal(100, 36)
-  volumeEth         Decimal        @db.Decimal(100, 36)
-  volumeUsd         Decimal?       @db.Decimal(100, 36)
-  tradeCount        BigInt
-  projectionVersion BigInt
-  token             Token          @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-
-  @@id([tokenId, chainId, interval, bucketStart])
-  @@map("candles")
-}
-
-model Milestone {
-  tokenId            String         @db.Uuid
-  chainId            Int
-  kind               MilestoneKind
-  index              Int
-  state              MilestoneState
-  levelLower         Int
-  levelUpper         Int
-  liquidity          Decimal?       @db.Decimal(78, 0)
-  tokenInventoryRaw  Decimal        @db.Decimal(78, 0)
-  tokenRemainingRaw  Decimal        @default(0) @db.Decimal(78, 0)
-  quoteProceedsRaw   Decimal        @default(0) @db.Decimal(78, 0)
-  grossHarvestRaw    Decimal        @default(0) @db.Decimal(78, 0)
-  serviceFeeRaw      Decimal        @default(0) @db.Decimal(78, 0)
-  netPotRaw          Decimal        @default(0) @db.Decimal(78, 0)
-  economicVersion    BigInt?
-  harvestedAt        DateTime?      @db.Timestamptz(6)
-  deployedAt         DateTime?      @db.Timestamptz(6)
-  skippedAt          DateTime?      @db.Timestamptz(6)
-  projectionVersion  BigInt
-  sourceBlockNumber  BigInt
-  sourceBlockTime    DateTime       @db.Timestamptz(6)
-  token              Token          @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-
-  @@id([tokenId, chainId, kind, index])
-  @@index([tokenId, chainId, state, kind, index])
-  @@map("milestones")
-}
-
-model Holding {
-  walletAddress     String   @db.VarChar(42)
-  tokenId           String   @db.Uuid
-  chainId           Int
-  balanceRaw        Decimal  @db.Decimal(78, 0)
-  valueUsd          Decimal? @db.Decimal(100, 36)
-  lastActivityAt    DateTime @db.Timestamptz(6)
-  projectionVersion BigInt
-  sourceBlockNumber BigInt
-  sourceBlockTime   DateTime @db.Timestamptz(6)
-  token             Token    @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-
-  @@id([walletAddress, tokenId, chainId])
-  @@index([walletAddress, valueUsd(sort: Desc)])
-  @@index([walletAddress, lastActivityAt(sort: Desc)])
-  @@map("holdings")
-}
-
-model RevenueEvent {
-  id                String          @id @default(uuid()) @db.Uuid
-  chainId           Int
-  tokenId           String?         @db.Uuid
-  poolId            String          @db.VarChar(66)
-  milestoneIndex    Int?
-  kind              String          @db.VarChar(48)
-  outcome           PayoutOutcome?
-  source            AccrualSource?
-  economicVersion   BigInt?
-  walletAddress     String?         @db.VarChar(42)
-  pluginIndex       Int?
-  amountRaw         Decimal         @db.Decimal(78, 0)
-  carriedAmountRaw  Decimal         @default(0) @db.Decimal(78, 0)
-  transactionHash   String          @db.VarChar(66)
-  logIndex          Int
-  blockNumber       BigInt
-  blockTime         DateTime        @db.Timestamptz(6)
-  token             Token?          @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-
-  @@unique([chainId, transactionHash, logIndex])
-  @@index([tokenId, chainId, blockNumber, logIndex])
-  @@index([poolId, kind, blockNumber])
-  @@index([walletAddress, blockNumber(sort: Desc)])
-  @@map("revenue_events")
-}
-
-// ---------------------------------------------------------------------------
-// Social (API-owned)
-// ---------------------------------------------------------------------------
-
 model Comment {
   id            String        @id @default(uuid()) @db.Uuid
-  tokenId       String        @db.Uuid
+  tokenDbId     String        @db.Uuid
   walletAddress String        @db.VarChar(42)
   parentId      String?       @db.Uuid
   rootId        String        @db.Uuid
@@ -569,16 +232,16 @@ model Comment {
   createdAt     DateTime      @default(now()) @db.Timestamptz(6)
   updatedAt     DateTime      @updatedAt @db.Timestamptz(6)
   deletedAt     DateTime?     @db.Timestamptz(6)
-  token         Token         @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  token         Token         @relation(fields: [tokenDbId], references: [id], onDelete: Cascade)
   author        Profile       @relation(fields: [walletAddress], references: [walletAddress])
   parent        Comment?      @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Restrict)
   replies       Comment[]     @relation("CommentReplies")
   likes         CommentLike[]
 
-  @@unique([id, tokenId])
-  @@index([tokenId, parentId, createdAt])
-  @@index([tokenId, rootId, createdAt])
-  @@index([tokenId, parentId, likeCount(sort: Desc), createdAt(sort: Desc)])
+  @@unique([id, tokenDbId])
+  @@index([tokenDbId, parentId, createdAt])
+  @@index([tokenDbId, rootId, createdAt])
+  @@index([tokenDbId, parentId, likeCount(sort: Desc), createdAt(sort: Desc)])
   @@map("comments")
 }
 
@@ -591,4 +254,715 @@ model CommentLike {
 
   @@id([commentId, walletAddress])
   @@map("comment_likes")
+}
+
+// ===========================================================================
+// Indexer infrastructure (API-owned read cut + reorg ledger)
+// ===========================================================================
+
+model DeploymentManifest {
+  chainId   Int      @id
+  document  Json
+  syncedAt  DateTime @updatedAt @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@map("deployment_manifests")
+}
+
+model ChainCursor {
+  chainId       Int      @id
+  nextBlock     BigInt
+  headBlock     BigInt
+  headBlockHash String   @db.VarChar(66)
+  headBlockTime DateTime @db.Timestamptz(6)
+  safeDepth     Int      @default(64)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
+
+  @@map("chain_cursors")
+}
+
+model ChainWatermark {
+  chainId          Int      @id
+  committedVersion BigInt
+  blockNumber      BigInt
+  blockHash        String   @db.VarChar(66)
+  blockTime        DateTime @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
+
+  @@map("chain_watermarks")
+}
+
+model BlockReceipt {
+  chainId          Int
+  blockNumber      BigInt
+  blockHash        String   @db.VarChar(66)
+  blockTime        DateTime @db.Timestamptz(6)
+  parentHash       String   @db.VarChar(66)
+  transactionCount Int
+  version          BigInt
+  ingestedAt       DateTime @default(now()) @db.Timestamptz(6)
+
+  @@id([chainId, blockNumber])
+  @@map("block_receipts")
+}
+
+model RawChainEvent {
+  chainId          Int      @map("chain_id")
+  blockNumber      BigInt   @map("block_number")
+  logIndex         Int      @map("log_index")
+  transactionIndex Int      @map("transaction_index")
+  transactionHash  String   @map("tx_hash") @db.VarChar(66)
+  address          String   @db.VarChar(42)
+  topic0           String   @db.VarChar(66)
+  topics           String[] @db.VarChar(66)
+  data             String   @db.VarChar(8192)
+  eventName        String?  @map("event_name") @db.VarChar(64)
+  blockHash        String   @map("block_hash") @db.VarChar(66)
+  blockTime        DateTime @map("timestamp") @db.Timestamptz(6)
+
+  @@id([chainId, blockNumber, logIndex])
+  @@index([address, topic0, blockNumber])
+  @@index([chainId, blockNumber(sort: Desc), logIndex(sort: Desc)])
+  @@map("raw_chain_events")
+}
+
+// ===========================================================================
+// State tables (upserted, last write wins) — per backend guide §2.1
+// ===========================================================================
+
+model Pool {
+  chainId         Int        @default(8453) @map("chain_id")
+  poolId          String     @map("pool_id") @db.VarChar(66)
+  status          PoolStatus @default(bonding)
+  token           String     @db.VarChar(42)
+  creator         String     @db.VarChar(42)
+  totalSupply     Decimal    @map("total_supply") @db.Decimal(78, 0)
+  openingLevel    Int        @map("opening_level")
+  farLevel        Int        @map("far_level")
+  graduationLevel Int?       @map("graduation_level")
+  payoutPlan      Decimal    @map("payout_plan") @db.Decimal(78, 0)
+  devBuyShareWad  Decimal    @map("dev_buy_share_wad") @db.Decimal(38, 18)
+  configHash      String     @map("config_hash") @db.VarChar(66)
+  wallLiquidity   Decimal?   @map("wall_liquidity") @db.Decimal(78, 0)
+  fullRangeLiq    Decimal?   @map("wall_full_range_liquidity") @db.Decimal(78, 0)
+  revenueNftOwner String?    @map("revenue_nft_owner") @db.VarChar(42)
+  revenueNftId    Decimal?   @map("revenue_nft_token_id") @db.Decimal(78, 0)
+  launchBlock     BigInt     @map("launch_block")
+  launchTime      DateTime   @map("launch_time") @db.Timestamptz(6)
+  graduationBlock BigInt?    @map("graduation_block")
+  graduationTime  DateTime?  @map("graduation_time") @db.Timestamptz(6)
+  updatedAt       DateTime   @updatedAt @db.Timestamptz(6)
+  tokenRecord     Token?     @relation(fields: [chainId, token], references: [chainId, token])
+  tokenDbId       String?    @db.Uuid
+  stats           PoolStats?
+  bands           Band[]
+  pot             Pot?
+
+  @@id([chainId, poolId])
+  @@unique([chainId, token])
+  @@index([status, launchTime(sort: Desc)])
+  @@index([creator])
+  @@map("pools")
+}
+
+model Band {
+  chainId       Int          @default(8453) @map("chain_id")
+  poolId        String       @map("pool_id") @db.VarChar(66)
+  bandIndex     Int          @map("band_index")
+  status        BandStatus   @default(live)
+  levelLower    Int          @map("level_lower")
+  levelUpper    Int          @map("level_upper")
+  liquidity     Decimal      @db.Decimal(78, 0)
+  tokenInventory Decimal     @map("token_inventory") @db.Decimal(78, 0)
+  deployedBlock BigInt       @map("deployed_block")
+  deployedAt    DateTime     @map("deployed_time") @db.Timestamptz(6)
+  completedBlock BigInt?     @map("completed_block")
+  completedAt   DateTime?    @map("completed_time") @db.Timestamptz(6)
+  pool          Pool         @relation(fields: [chainId, poolId], references: [chainId, poolId], onDelete: Cascade)
+
+  @@id([chainId, poolId, bandIndex])
+  @@index([chainId, poolId, status])
+  @@map("bands")
+}
+
+model Pot {
+  chainId         Int     @default(8453) @map("chain_id")
+  poolId          String  @map("pool_id") @db.VarChar(66)
+  balance         Decimal @db.Decimal(78, 0) @default(0)
+  fundedTotal     Decimal @map("funded_total") @db.Decimal(78, 0) @default(0)
+  serviceFeeTotal Decimal @map("service_fee_total") @db.Decimal(78, 0) @default(0)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(6)
+  pool            Pool    @relation(fields: [chainId, poolId], references: [chainId, poolId], onDelete: Cascade)
+
+  @@id([chainId, poolId])
+  @@map("pots")
+}
+
+model PluginRegistryEntry {
+  chainId         Int        @default(8453) @map("chain_id")
+  registryIndex   Int        @map("registry_index")
+  plugin          String     @db.VarChar(42)
+  takeWad         Decimal    @map("take_wad") @db.Decimal(38, 18)
+  gasLimit        Int        @map("gas_limit")
+  codeHash        String     @map("code_hash") @db.VarChar(66)
+  role            PluginRole
+  suspended       Boolean    @default(false)
+  registeredBlock BigInt     @map("registered_block")
+  updatedAt       DateTime   @updatedAt @db.Timestamptz(6)
+
+  @@id([chainId, registryIndex])
+  @@unique([chainId, plugin])
+  @@map("plugin_registry")
+}
+
+model EconomicConfig {
+  chainId                    Int      @default(8453) @map("chain_id")
+  version                    BigInt
+  harvestServiceFeeWad       Decimal  @map("harvest_service_fee_wad") @db.Decimal(38, 18)
+  quoteCreatorShareWad       Decimal  @map("quote_creator_share_wad") @db.Decimal(38, 18)
+  tokenMilestoneFundShareWad Decimal  @map("token_milestone_fund_share_wad") @db.Decimal(38, 18)
+  effectiveBlock             BigInt   @map("effective_block")
+  effectiveAt                DateTime @map("effective_time") @db.Timestamptz(6)
+
+  @@id([chainId, version])
+  @@map("economic_configs")
+}
+
+model ProtocolState {
+  chainId                Int      @default(8453) @map("chain_id") @id
+  economicVersion        BigInt   @map("economic_version") @default(1)
+  protocolRecipient      String?  @map("protocol_recipient") @db.VarChar(42)
+  trustedOperator        String?  @map("trusted_operator") @db.VarChar(42)
+  trustedOperatorBlock   BigInt?  @map("trusted_operator_set_block")
+  administrator          String?  @db.VarChar(42)
+  pendingAdministrator   String?  @map("pending_administrator") @db.VarChar(42)
+  governanceDelaySeconds BigInt?  @map("governance_delay_seconds")
+  lastIndexedBlock       BigInt   @map("last_indexed_block") @default(0)
+  updatedAt              DateTime @updatedAt @db.Timestamptz(6)
+
+  @@map("protocol_state")
+}
+
+model GovernanceOperation {
+  chainId          Int               @default(8453) @map("chain_id")
+  operationId      String            @map("operation_id") @db.VarChar(66)
+  action           GovernanceAction
+  payload          Json
+  status           GovernanceStatus  @default(SCHEDULED)
+  readyAt          DateTime?         @map("ready_at") @db.Timestamptz(6)
+  executedAtBlock  BigInt?           @map("executed_at_block")
+  cancelledAtBlock BigInt?           @map("cancelled_at_block")
+  blockTime        DateTime          @map("timestamp") @db.Timestamptz(6)
+
+  @@id([chainId, operationId])
+  @@index([chainId, status])
+  @@map("governance_operations")
+}
+
+// ===========================================================================
+// Aggregate tables (sink delta-ops only) — per backend guide §2.2
+// ===========================================================================
+
+model PoolStats {
+  chainId                  Int      @default(8453) @map("chain_id")
+  poolId                   String   @map("pool_id") @db.VarChar(66)
+  buyVolumeEth             Decimal  @default(0) @map("buy_volume_eth") @db.Decimal(78, 0)
+  sellVolumeEth            Decimal  @default(0) @map("sell_volume_eth") @db.Decimal(78, 0)
+  buyVolumeTokens          Decimal  @default(0) @map("buy_volume_tokens") @db.Decimal(78, 0)
+  sellVolumeTokens         Decimal  @default(0) @map("sell_volume_tokens") @db.Decimal(78, 0)
+  swapCount                BigInt   @default(0) @map("swap_count")
+  lastPriceSqrtX96         Decimal  @map("last_price_sqrt_x96") @db.Decimal(78, 0)
+  athSqrtX96               Decimal  @default(0) @map("ath_sqrt_x96") @db.Decimal(78, 0)
+  creatorRevenueTotal      Decimal  @default(0) @map("creator_revenue_total") @db.Decimal(78, 0)
+  creatorRevenueCurve      Decimal  @default(0) @map("creator_revenue_curve") @db.Decimal(78, 0)
+  creatorRevenueSwapFees   Decimal  @default(0) @map("creator_revenue_swap_fees") @db.Decimal(78, 0)
+  protocolRevenueTotal     Decimal  @default(0) @map("protocol_revenue_total") @db.Decimal(78, 0)
+  protocolRevenueCurve     Decimal  @default(0) @map("protocol_revenue_curve") @db.Decimal(78, 0)
+  protocolRevenueSwapFees  Decimal  @default(0) @map("protocol_revenue_swap_fees") @db.Decimal(78, 0)
+  protocolRevenueHarvest   Decimal  @default(0) @map("protocol_revenue_harvest_fees") @db.Decimal(78, 0)
+  creatorPathRevenueTotal  Decimal  @default(0) @map("creator_path_revenue_total") @db.Decimal(78, 0)
+  pluginRevenueTotal       Decimal  @default(0) @map("plugin_revenue_total") @db.Decimal(78, 0)
+  potFundedTotal           Decimal  @default(0) @map("pot_funded_total") @db.Decimal(78, 0)
+  tipsTotal                Decimal  @default(0) @map("tips_total") @db.Decimal(78, 0)
+  bandsDeployed            Int      @default(0) @map("bands_deployed")
+  harvestCount             Int      @default(0) @map("harvest_count")
+  harvestQuoteTotal        Decimal  @default(0) @map("harvest_quote_total") @db.Decimal(78, 0)
+  swapFeeBurnedTokens      Decimal  @default(0) @map("swap_fee_burned_tokens") @db.Decimal(78, 0)
+  burnedTotal              Decimal  @default(0) @map("burned_total") @db.Decimal(78, 0)
+  lastSwapBlock            BigInt   @default(0) @map("last_swap_block")
+  updatedAt                DateTime @updatedAt @db.Timestamptz(6)
+  pool                     Pool     @relation(fields: [chainId, poolId], references: [chainId, poolId], onDelete: Cascade)
+
+  @@id([chainId, poolId])
+  @@map("pool_stats")
+}
+
+model PoolMinuteStats {
+  chainId          BigInt   @default(8453) @map("chain_id")
+  poolId           String   @map("pool_id") @db.VarChar(66)
+  minute           DateTime @db.Timestamptz(6)
+  openSqrtX96      Decimal  @map("open_sqrt_x96") @db.Decimal(78, 0)
+  closeSqrtX96     Decimal  @map("close_sqrt_x96") @db.Decimal(78, 0)
+  highSqrtX96      Decimal  @map("high_sqrt_x96") @db.Decimal(78, 0)
+  lowSqrtX96       Decimal  @map("low_sqrt_x96") @db.Decimal(78, 0)
+  buyVolumeEth     Decimal  @default(0) @map("buy_volume_eth") @db.Decimal(78, 0)
+  sellVolumeEth    Decimal  @default(0) @map("sell_volume_eth") @db.Decimal(78, 0)
+  buyVolumeTokens  Decimal  @default(0) @map("buy_volume_tokens") @db.Decimal(78, 0)
+  sellVolumeTokens Decimal  @default(0) @map("sell_volume_tokens") @db.Decimal(78, 0)
+  swapCount        BigInt   @default(0) @map("swap_count")
+  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
+
+  @@id([chainId, poolId, minute])
+  @@index([poolId, minute(sort: Desc)])
+  @@map("pool_minute_stats")
+}
+
+model PoolHourStats {
+  chainId          BigInt   @default(8453) @map("chain_id")
+  poolId           String   @map("pool_id") @db.VarChar(66)
+  hour             DateTime @db.Timestamptz(6)
+  openSqrtX96      Decimal  @map("open_sqrt_x96") @db.Decimal(78, 0)
+  closeSqrtX96     Decimal  @map("close_sqrt_x96") @db.Decimal(78, 0)
+  highSqrtX96      Decimal  @map("high_sqrt_x96") @db.Decimal(78, 0)
+  lowSqrtX96       Decimal  @map("low_sqrt_x96") @db.Decimal(78, 0)
+  buyVolumeEth     Decimal  @default(0) @map("buy_volume_eth") @db.Decimal(78, 0)
+  sellVolumeEth    Decimal  @default(0) @map("sell_volume_eth") @db.Decimal(78, 0)
+  buyVolumeTokens  Decimal  @default(0) @map("buy_volume_tokens") @db.Decimal(78, 0)
+  sellVolumeTokens Decimal  @default(0) @map("sell_volume_tokens") @db.Decimal(78, 0)
+  swapCount        BigInt   @default(0) @map("swap_count")
+  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
+
+  @@id([chainId, poolId, hour])
+  @@index([poolId, hour(sort: Desc)])
+  @@map("pool_hour_stats")
+}
+
+model PoolDayStats {
+  chainId           BigInt   @default(8453) @map("chain_id")
+  poolId            String   @map("pool_id") @db.VarChar(66)
+  day               DateTime @db.Timestamptz(6)
+  openSqrtX96       Decimal  @map("open_sqrt_x96") @db.Decimal(78, 0)
+  closeSqrtX96      Decimal  @map("close_sqrt_x96") @db.Decimal(78, 0)
+  highSqrtX96       Decimal  @map("high_sqrt_x96") @db.Decimal(78, 0)
+  lowSqrtX96        Decimal  @map("low_sqrt_x96") @db.Decimal(78, 0)
+  buyVolumeEth      Decimal  @default(0) @map("buy_volume_eth") @db.Decimal(78, 0)
+  sellVolumeEth     Decimal  @default(0) @map("sell_volume_eth") @db.Decimal(78, 0)
+  buyVolumeTokens   Decimal  @default(0) @map("buy_volume_tokens") @db.Decimal(78, 0)
+  sellVolumeTokens  Decimal  @default(0) @map("sell_volume_tokens") @db.Decimal(78, 0)
+  swapCount         BigInt   @default(0) @map("swap_count")
+  creatorRevenueEth Decimal  @default(0) @map("creator_revenue_eth") @db.Decimal(78, 0)
+  protocolRevenueEth Decimal @default(0) @map("protocol_revenue_eth") @db.Decimal(78, 0)
+  updatedAt         DateTime @updatedAt @db.Timestamptz(6)
+
+  @@id([chainId, poolId, day])
+  @@index([poolId, day(sort: Desc)])
+  @@map("pool_day_stats")
+}
+
+model ProtocolDayStats {
+  chainId            BigInt   @default(8453) @map("chain_id")
+  day                DateTime @db.Timestamptz(6)
+  buyVolumeEth       Decimal  @default(0) @map("buy_volume_eth") @db.Decimal(78, 0)
+  sellVolumeEth      Decimal  @default(0) @map("sell_volume_eth") @db.Decimal(78, 0)
+  swapCount          BigInt   @default(0) @map("swap_count")
+  creatorRevenueEth  Decimal  @default(0) @map("creator_revenue_eth") @db.Decimal(78, 0)
+  protocolRevenueEth Decimal  @default(0) @map("protocol_revenue_eth") @db.Decimal(78, 0)
+  harvestFeesEth     Decimal  @default(0) @map("harvest_fees_eth") @db.Decimal(78, 0)
+  graduationCount    Int      @default(0) @map("graduation_count")
+  launchCount        Int      @default(0) @map("launch_count")
+  updatedAt          DateTime @updatedAt @db.Timestamptz(6)
+
+  @@id([chainId, day])
+  @@map("protocol_day_stats")
+}
+
+model ProtocolStats {
+  chainId                BigInt   @default(8453) @map("chain_id") @id
+  protocolRevenueCurve   Decimal  @default(0) @map("protocol_revenue_curve") @db.Decimal(78, 0)
+  protocolRevenueSwapFees Decimal @default(0) @map("protocol_revenue_swap_fees") @db.Decimal(78, 0)
+  protocolRevenueHarvest Decimal  @default(0) @map("protocol_revenue_harvest_fees") @db.Decimal(78, 0)
+  protocolRevenueTotal   Decimal  @default(0) @map("protocol_revenue_total") @db.Decimal(78, 0)
+  claimedTotal           Decimal  @default(0) @map("claimed_total") @db.Decimal(78, 0)
+  updatedAt              DateTime @updatedAt @db.Timestamptz(6)
+
+  @@map("protocol_stats")
+}
+
+// ===========================================================================
+// Fact tables (insert-only, PK ordinal_key "<block>:<log>") — guide §2.3
+// ===========================================================================
+
+model LaunchFact {
+  chainId         Int      @default(8453) @map("chain_id")
+  ordinalKey      String   @map("ordinal_key") @db.VarChar(40)
+  poolId          String   @map("pool_id") @db.VarChar(66)
+  creator         String   @db.VarChar(42)
+  token           String   @db.VarChar(42)
+  name            String   @db.VarChar(320)
+  symbol          String   @db.VarChar(12)
+  uri             String   @db.VarChar(2048)
+  totalSupply     Decimal  @map("total_supply") @db.Decimal(78, 0)
+  openingLevel    Int      @map("opening_level")
+  farLevel        Int      @map("far_level")
+  configHash      String   @map("config_hash") @db.VarChar(66)
+  transactionHash String   @map("tx_hash") @db.VarChar(66)
+  logIndex        Int      @map("log_index")
+  blockNumber     BigInt   @map("block_number")
+  timestamp       DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("launches")
+}
+
+model GraduationFact {
+  chainId          Int      @default(8453) @map("chain_id")
+  ordinalKey       String   @map("ordinal_key") @db.VarChar(40)
+  poolId           String   @map("pool_id") @db.VarChar(66)
+  graduationLevel  Int      @map("graduation_level")
+  quoteProceeds    Decimal  @map("quote_proceeds") @db.Decimal(78, 0)
+  lpSeedQuote      Decimal  @map("lp_seed_quote") @db.Decimal(78, 0)
+  creatorQuote     Decimal  @map("creator_quote") @db.Decimal(78, 0)
+  protocolQuote    Decimal  @map("protocol_quote") @db.Decimal(78, 0)
+  fullRangeLiquidity Decimal @map("full_range_liquidity") @db.Decimal(78, 0)
+  wallLiquidity    Decimal  @map("wall_liquidity") @db.Decimal(78, 0)
+  transactionHash  String   @map("tx_hash") @db.VarChar(66)
+  logIndex         Int      @map("log_index")
+  blockNumber      BigInt   @map("block_number")
+  timestamp        DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("graduations")
+}
+
+model SwapFact {
+  chainId         Int      @default(8453) @map("chain_id")
+  ordinalKey      String   @map("ordinal_key") @db.VarChar(40)
+  poolId          String   @map("pool_id") @db.VarChar(66)
+  sender          String   @db.VarChar(42)
+  isBuy           Boolean  @map("is_buy")
+  amount0Eth      Decimal  @map("amount0_eth") @db.Decimal(78, 0)
+  amount1Tokens   Decimal  @map("amount1_tokens") @db.Decimal(78, 0)
+  sqrtPriceX96    Decimal  @map("sqrt_price_x96") @db.Decimal(78, 0)
+  tick            Int
+  fee             Int
+  feeEth          Decimal  @map("fee_eth") @db.Decimal(78, 0)
+  feeTokens       Decimal  @map("fee_tokens") @db.Decimal(78, 0)
+  transactionHash String   @map("tx_hash") @db.VarChar(66)
+  logIndex        Int      @map("log_index")
+  blockNumber     BigInt   @map("block_number")
+  timestamp       DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId, timestamp(sort: Desc), logIndex(sort: Desc)], map: "idx_swaps_pool_time")
+  @@map("swaps")
+}
+
+model CurveDeploymentFact {
+  chainId         Int      @default(8453) @map("chain_id")
+  ordinalKey      String   @map("ordinal_key") @db.VarChar(40)
+  poolId          String   @map("pool_id") @db.VarChar(66)
+  minted          Decimal  @db.Decimal(78, 0)
+  deployed        Decimal  @db.Decimal(78, 0)
+  tokenSettled    Decimal  @map("token_settled") @db.Decimal(78, 0)
+  transactionHash String   @map("tx_hash") @db.VarChar(66)
+  logIndex        Int      @map("log_index")
+  blockNumber     BigInt   @map("block_number")
+  timestamp       DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("curve_deployments")
+}
+
+model MilestoneHarvestFact {
+  chainId             Int      @default(8453) @map("chain_id")
+  ordinalKey          String   @map("ordinal_key") @db.VarChar(40)
+  poolId              String   @map("pool_id") @db.VarChar(66)
+  bandIndex           Int      @map("band_index")
+  quoteProceeds       Decimal  @map("quote_proceeds") @db.Decimal(78, 0)
+  tokenResidue        Decimal  @map("token_residue") @db.Decimal(78, 0)
+  completedMilestones Int      @map("completed_milestones")
+  transactionHash     String   @map("tx_hash") @db.VarChar(66)
+  logIndex            Int      @map("log_index")
+  blockNumber         BigInt   @map("block_number")
+  timestamp           DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId, bandIndex])
+  @@map("milestone_harvests")
+}
+
+model HarvestPayoutFact {
+  chainId         Int      @default(8453) @map("chain_id")
+  ordinalKey      String   @map("ordinal_key") @db.VarChar(40)
+  poolId          String   @map("pool_id") @db.VarChar(66)
+  milestoneIndex  Int      @map("milestone_index")
+  grossQuote      Decimal  @map("gross_quote") @db.Decimal(78, 0)
+  serviceFee      Decimal  @map("service_fee") @db.Decimal(78, 0)
+  netQuote        Decimal  @map("net_quote") @db.Decimal(78, 0)
+  economicVersion BigInt   @map("economic_version")
+  transactionHash String   @map("tx_hash") @db.VarChar(66)
+  logIndex        Int      @map("log_index")
+  blockNumber     BigInt   @map("block_number")
+  timestamp       DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("harvest_payouts")
+}
+
+model BandSkipFact {
+  chainId          Int      @default(8453) @map("chain_id")
+  ordinalKey       String   @map("ordinal_key") @db.VarChar(40)
+  poolId           String   @map("pool_id") @db.VarChar(66)
+  bandIndex        Int      @map("band_index")
+  carriedInventory Decimal  @map("carried_inventory") @db.Decimal(78, 0)
+  transactionHash  String   @map("tx_hash") @db.VarChar(66)
+  logIndex         Int      @map("log_index")
+  blockNumber      BigInt   @map("block_number")
+  timestamp        DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("band_skips")
+}
+
+model DevBuyFact {
+  chainId         Int      @default(8453) @map("chain_id")
+  ordinalKey      String   @map("ordinal_key") @db.VarChar(40)
+  poolId          String   @map("pool_id") @db.VarChar(66)
+  tokensBought    Decimal  @map("tokens_bought") @db.Decimal(78, 0)
+  ethSpent        Decimal  @map("eth_spent") @db.Decimal(78, 0)
+  transactionHash String   @map("tx_hash") @db.VarChar(66)
+  logIndex        Int      @map("log_index")
+  blockNumber     BigInt   @map("block_number")
+  timestamp       DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("dev_buys")
+}
+
+model DevBuySkipFact {
+  chainId         Int      @default(8453) @map("chain_id")
+  ordinalKey      String   @map("ordinal_key") @db.VarChar(40)
+  poolId          String   @map("pool_id") @db.VarChar(66)
+  relayer         String   @db.VarChar(42)
+  tokensRequested Decimal  @map("tokens_requested") @db.Decimal(78, 0)
+  transactionHash String   @map("tx_hash") @db.VarChar(66)
+  logIndex        Int      @map("log_index")
+  blockNumber     BigInt   @map("block_number")
+  timestamp       DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("dev_buy_skips")
+}
+
+model PayoutPotFundingFact {
+  chainId         Int      @default(8453) @map("chain_id")
+  ordinalKey      String   @map("ordinal_key") @db.VarChar(40)
+  poolId          String   @map("pool_id") @db.VarChar(66)
+  milestoneIndex  Int      @map("milestone_index")
+  grossQuote      Decimal  @map("gross_quote") @db.Decimal(78, 0)
+  serviceFee      Decimal  @map("service_fee") @db.Decimal(78, 0)
+  netQuote        Decimal  @map("net_quote") @db.Decimal(78, 0)
+  economicVersion BigInt   @map("economic_version")
+  transactionHash String   @map("tx_hash") @db.VarChar(66)
+  logIndex        Int      @map("log_index")
+  blockNumber     BigInt   @map("block_number")
+  timestamp       DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("payout_pot_fundings")
+}
+
+model PayoutPotRedemptionFact {
+  chainId         Int      @default(8453) @map("chain_id")
+  ordinalKey      String   @map("ordinal_key") @db.VarChar(40)
+  poolId          String   @map("pool_id") @db.VarChar(66)
+  amount          Decimal  @db.Decimal(78, 0)
+  transactionHash String   @map("tx_hash") @db.VarChar(66)
+  logIndex        Int      @map("log_index")
+  blockNumber     BigInt   @map("block_number")
+  timestamp       DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("payout_pot_redemptions")
+}
+
+model PayoutTipFact {
+  chainId         Int      @default(8453) @map("chain_id")
+  ordinalKey      String   @map("ordinal_key") @db.VarChar(40)
+  poolId          String   @map("pool_id") @db.VarChar(66)
+  recipient       String   @db.VarChar(42)
+  amount          Decimal  @db.Decimal(78, 0)
+  transactionHash String   @map("tx_hash") @db.VarChar(66)
+  logIndex        Int      @map("log_index")
+  blockNumber     BigInt   @map("block_number")
+  timestamp       DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("payout_tips")
+}
+
+model PluginPayoutFact {
+  chainId         Int          @default(8453) @map("chain_id")
+  ordinalKey      String       @map("ordinal_key") @db.VarChar(40)
+  poolId          String       @map("pool_id") @db.VarChar(66)
+  pluginIndex     Int          @map("plugin_index")
+  plugin          String?      @db.VarChar(42)
+  outcome         PayoutOutcome
+  currentShare    Decimal      @map("current_share") @db.Decimal(78, 0)
+  previousCarry   Decimal      @map("previous_carry") @db.Decimal(78, 0)
+  amount          Decimal      @db.Decimal(78, 0)
+  transactionHash String       @map("tx_hash") @db.VarChar(66)
+  logIndex        Int          @map("log_index")
+  blockNumber     BigInt       @map("block_number")
+  timestamp       DateTime     @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("plugin_payouts")
+}
+
+model CreatorAccrualFact {
+  chainId         Int           @default(8453) @map("chain_id")
+  ordinalKey      String        @map("ordinal_key") @db.VarChar(40)
+  poolId          String        @map("pool_id") @db.VarChar(66)
+  amount          Decimal       @db.Decimal(78, 0)
+  source          AccrualSource
+  economicVersion BigInt        @map("economic_version")
+  transactionHash String        @map("tx_hash") @db.VarChar(66)
+  logIndex        Int           @map("log_index")
+  blockNumber     BigInt        @map("block_number")
+  timestamp       DateTime      @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId, source])
+  @@map("creator_accruals")
+}
+
+model ProtocolAccrualFact {
+  chainId         Int           @default(8453) @map("chain_id")
+  ordinalKey      String        @map("ordinal_key") @db.VarChar(40)
+  poolId          String        @map("pool_id") @db.VarChar(66)
+  amount          Decimal       @db.Decimal(78, 0)
+  source          AccrualSource
+  economicVersion BigInt        @map("economic_version")
+  transactionHash String        @map("tx_hash") @db.VarChar(66)
+  logIndex        Int           @map("log_index")
+  blockNumber     BigInt        @map("block_number")
+  timestamp       DateTime      @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId, source])
+  @@map("protocol_accruals")
+}
+
+model CreatorPathAccrualFact {
+  chainId         Int      @default(8453) @map("chain_id")
+  ordinalKey      String   @map("ordinal_key") @db.VarChar(40)
+  poolId          String   @map("pool_id") @db.VarChar(66)
+  amount          Decimal  @db.Decimal(78, 0)
+  transactionHash String   @map("tx_hash") @db.VarChar(66)
+  logIndex        Int      @map("log_index")
+  blockNumber     BigInt   @map("block_number")
+  timestamp       DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("creator_path_accruals")
+}
+
+model ClaimFact {
+  chainId         Int       @default(8453) @map("chain_id")
+  ordinalKey      String    @map("ordinal_key") @db.VarChar(40)
+  poolId          String    @map("pool_id") @db.VarChar(66)
+  claimType       ClaimType @map("claim_type")
+  holder          String    @db.VarChar(42)
+  amount          Decimal   @db.Decimal(78, 0)
+  transactionHash String    @map("tx_hash") @db.VarChar(66)
+  logIndex        Int       @map("log_index")
+  blockNumber     BigInt    @map("block_number")
+  timestamp       DateTime  @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([holder, timestamp(sort: Desc)])
+  @@index([poolId, claimType])
+  @@map("claims")
+}
+
+model CreatorPathClaimFailureFact {
+  chainId         Int      @default(8453) @map("chain_id")
+  ordinalKey      String   @map("ordinal_key") @db.VarChar(40)
+  poolId          String   @map("pool_id") @db.VarChar(66)
+  holder          String   @db.VarChar(42)
+  amount          Decimal  @db.Decimal(78, 0)
+  transactionHash String   @map("tx_hash") @db.VarChar(66)
+  logIndex        Int      @map("log_index")
+  blockNumber     BigInt   @map("block_number")
+  timestamp       DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("creator_path_claim_failures")
+}
+
+model FeeCollectionFact {
+  chainId         Int      @default(8453) @map("chain_id")
+  ordinalKey      String   @map("ordinal_key") @db.VarChar(40)
+  poolId          String   @map("pool_id") @db.VarChar(66)
+  caller          String   @db.VarChar(42)
+  quoteFees       Decimal  @map("quote_fees") @db.Decimal(78, 0)
+  tokenFees       Decimal  @map("token_fees") @db.Decimal(78, 0)
+  transactionHash String   @map("tx_hash") @db.VarChar(66)
+  logIndex        Int      @map("log_index")
+  blockNumber     BigInt   @map("block_number")
+  timestamp       DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("fee_collections")
+}
+
+model FeeRoutingFact {
+  chainId            Int      @default(8453) @map("chain_id")
+  ordinalKey         String   @map("ordinal_key") @db.VarChar(40)
+  poolId             String   @map("pool_id") @db.VarChar(66)
+  creatorQuote       Decimal  @map("creator_quote") @db.Decimal(78, 0)
+  protocolQuote      Decimal  @map("protocol_quote") @db.Decimal(78, 0)
+  divertedToNextBand Decimal  @map("diverted_to_next_band") @db.Decimal(78, 0)
+  tokensBurned       Decimal  @map("tokens_burned") @db.Decimal(78, 0)
+  economicVersion    BigInt   @map("economic_version")
+  transactionHash    String   @map("tx_hash") @db.VarChar(66)
+  logIndex           Int      @map("log_index")
+  blockNumber        BigInt   @map("block_number")
+  timestamp          DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("fee_routings")
+}
+
+model TokenBurnFact {
+  chainId         Int      @default(8453) @map("chain_id")
+  ordinalKey      String   @map("ordinal_key") @db.VarChar(40)
+  poolId          String?  @map("pool_id") @db.VarChar(66)
+  token           String   @db.VarChar(42)
+  burner          String   @db.VarChar(42)
+  amount          Decimal  @db.Decimal(78, 0)
+  transactionHash String   @map("tx_hash") @db.VarChar(66)
+  logIndex        Int      @map("log_index")
+  blockNumber     BigInt   @map("block_number")
+  timestamp       DateTime @db.Timestamptz(6)
+
+  @@id([chainId, ordinalKey])
+  @@index([poolId])
+  @@map("token_burns")
 }

@@ -55,12 +55,12 @@ export class CommentLikesService {
             })
           : comment;
         const generation = inserted
-          ? await advanceCommentCacheGeneration(tx, comment.tokenId)
+          ? await advanceCommentCacheGeneration(tx, comment.tokenDbId)
           : null;
         return {
           value: { commentId, walletAddress, liked: true, likeCount: updated.likeCount },
           generation,
-          tokenId: comment.tokenId,
+          tokenId: comment.tokenDbId,
         };
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -85,12 +85,12 @@ export class CommentLikesService {
             })
           : comment;
         const generation = removed.count
-          ? await advanceCommentCacheGeneration(tx, comment.tokenId)
+          ? await advanceCommentCacheGeneration(tx, comment.tokenDbId)
           : null;
         return {
           value: { commentId, walletAddress, liked: false, likeCount: updated.likeCount },
           generation,
-          tokenId: comment.tokenId,
+          tokenId: comment.tokenDbId,
         };
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },

@@ -280,30 +280,48 @@ export class BlockIngesterService {
     });
   }
 
-  /** Deletes every projection row stamped with versions from rolled-back blocks. */
+  /**
+   * Deletes every fact table row from `blockNumber` forward (facts are the only
+   * block-stamped, replay-safe store; state is last-write-wins and gets re-applied
+   * by the re-ingest pass). Aggregates are rebuilt once from surviving facts by the
+   * caller after the rollback loop completes.
+   */
   async rollbackProjections(tx: Prisma.TransactionClient, blockNumber: bigint): Promise<void> {
     const chainId = this.config!.chainId;
-    // Trades, milestones, revenue events, raw events, and per-token state rows stamped
-    // with versions higher than the rejoin point are all rolled back.
-    const tokenIds = await tx.tokenChainState.findMany({
-      where: { chainId, sourceBlockNumber: { gte: blockNumber } },
-      select: { tokenId: true },
-    });
-    const ids = tokenIds.map((t) => t.tokenId);
-    if (ids.length > 0) {
-      await tx.trade.deleteMany({
-        where: { chainId, tokenId: { in: ids }, blockNumber: { gte: blockNumber } },
-      });
-      await tx.revenueEvent.deleteMany({ where: { chainId, blockNumber: { gte: blockNumber } } });
+    const factTables = [
+      'launches',
+      'graduations',
+      'swaps',
+      'curve_deployments',
+      'milestone_harvests',
+      'harvest_payouts',
+      'band_skips',
+      'dev_buys',
+      'dev_buy_skips',
+      'payout_pot_fundings',
+      'payout_pot_redemptions',
+      'payout_tips',
+      'plugin_payouts',
+      'creator_accruals',
+      'protocol_accruals',
+      'creator_path_accruals',
+      'claims',
+      'creator_path_claim_failures',
+      'fee_collections',
+      'fee_routings',
+      'token_burns',
+    ];
+    for (const table of factTables) {
+      await tx.$executeRawUnsafe(
+        `DELETE FROM ${table} WHERE "chain_id" = ${chainId} AND "block_number" >= ${blockNumber};`,
+      );
     }
-    await tx.rawChainEvent.deleteMany({ where: { chainId, blockNumber: { gte: blockNumber } } });
-    // Token chain states touched by the rolled-back range revert to their last
-    // committed snapshot; a conservative approach deletes them so the next block
-    // re-projects from the raw event log (event handlers are idempotent against
-    // rawChainEvent existence).
-    await tx.tokenChainState.deleteMany({
-      where: { chainId, sourceBlockNumber: { gte: blockNumber } },
-    });
+    await tx.$executeRawUnsafe(
+      `DELETE FROM raw_chain_events WHERE "chain_id" = ${chainId} AND "block_number" >= ${blockNumber};`,
+    );
+    await tx.$executeRawUnsafe(
+      `DELETE FROM bands WHERE "chain_id" = ${chainId} AND "deployed_block" >= ${blockNumber};`,
+    );
   }
 
   book(): { hook: string; poolManager: string; chainId: number } {

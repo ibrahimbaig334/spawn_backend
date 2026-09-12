@@ -1,25 +1,29 @@
-import { Injectable } from '@nestjs/common';
-import { NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import type { Address } from 'viem';
 import { PrismaService } from '../../infrastructure/database/prisma.service';
 import { BlockchainRegistryService } from '../../infrastructure/blockchain/blockchain-registry.service';
 import { ProtocolReadService } from '../../infrastructure/blockchain/protocol-read.service';
 import { ChainClientFactory } from '../../infrastructure/blockchain/chain-client.factory';
 import { V4_QUOTER_ABI } from '../../infrastructure/blockchain/contract-abis';
 import { spawnPoolKey } from '../../infrastructure/blockchain/contract-readers';
-import { decimalToBig } from '../../indexer/decimal-utils';
 import {
-  toLevel,
-  fdvEthWeiAtSqrtPrice,
   curvePositionLiquidity,
   curvePositionStart,
-  tokenPriceEthString,
-  fdvEthWeiAtLevel,
+  sqrtPriceAtLevel,
 } from '../../protocol/protocol-math';
-import { EthUsdOracle } from '../../infrastructure/blockchain/eth-usd-oracle';
+import {
+  PROTOCOL_TEMPLATE_DEFAULT as T,
+  FULL_RANGE_TICK_LOWER,
+  FULL_RANGE_TICK_UPPER,
+  WALL_WIDTH_LEVELS,
+} from '../../protocol/protocol-constants';
+import { sqrtToEthString, fdvEthWei, levelFromSqrtPrice } from './price';
+import type { QuoteQueryDto, DepthQueryDto } from './dto/trading-query.dto';
 
 /**
- * Trading reads: live price (level space), V4Quoter swaps, and ladder depth.
- * Everything user-facing is level-space; the tick boundary is crossed exactly once.
+ * Trading reads: price from the last committed sqrt price (live StateView
+ * refresh where available), V4Quoter quotes, and protocol-position depth
+ * (curve positions while bonding; bands + full-range + wall once graduated).
  */
 
 @Injectable()
@@ -29,88 +33,74 @@ export class TradingService {
     private readonly registry: BlockchainRegistryService,
     private readonly protocolReads: ProtocolReadService,
     private readonly clientFactory: ChainClientFactory,
-    private readonly oracle: EthUsdOracle,
   ) {}
 
-  private async resolveToken(chainId: number, tokenRef: string) {
-    const uuidLike = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-      tokenRef,
-    );
-    const committed = await this.prisma.chainWatermark.findUnique({ where: { chainId } });
-    if (!committed)
-      throw new NotFoundException({
-        code: 'TOKEN_NOT_FOUND',
-        message: 'no committed projections yet',
-      });
-    const token = await this.prisma.token.findFirst({
-      where: uuidLike
-        ? { id: tokenRef, chainId }
-        : { chainId, projection: { contractAddress: tokenRef.toLowerCase() } },
-      include: { projection: true },
+  private async poolOrThrow(tokenRef: string, chainId: number) {
+    const norm = tokenRef.toLowerCase();
+    const isPoolId = norm.startsWith('0x') && norm.length === 66;
+    const pool = await this.prisma.pool.findUnique({
+      where: isPoolId
+        ? { chainId_poolId: { chainId, poolId: norm } }
+        : { chainId_token: { chainId, token: norm } },
     });
-    if (!token?.projection)
+    if (!pool)
       throw new NotFoundException({
         code: 'TOKEN_NOT_FOUND',
-        message: `token ${tokenRef} not found`,
+        message: `no launch for ${tokenRef}`,
       });
-    return token;
+    return pool;
   }
 
-  async price(tokenRef: string, query: { chainId?: number }): Promise<TokenPricePresenter> {
+  async price(tokenRef: string, query: { chainId?: number }) {
     const chainId = query.chainId ?? Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
-    const token = await this.resolveToken(chainId, tokenRef);
-    const state = token.projection!;
+    const pool = await this.poolOrThrow(tokenRef, chainId);
+    const stats = await this.prisma.poolStats.findUnique({
+      where: { chainId_poolId: { chainId, poolId: pool.poolId } },
+    });
 
-    // Prefer the last indexer-seen price; fall back to a live slot0 read.
-    let level = state.lastPriceLevel ?? state.openingLevel;
-    let sqrtPriceX96: bigint | null = state.lastSqrtPriceX96
-      ? decimalToBig(state.lastSqrtPriceX96)
-      : null;
+    let sqrt = stats?.lastPriceSqrtX96 ? BigInt(stats.lastPriceSqrtX96.toFixed()) : 0n;
+    let source: 'indexer' | 'live' | 'opening' = 'indexer';
     try {
-      const slot0 = await this.protocolReads.slot0(chainId, state.poolId);
+      const slot0 = await this.protocolReads.slot0(chainId, pool.poolId);
       if (slot0) {
-        level = toLevel(slot0.tick);
-        sqrtPriceX96 = slot0.sqrtPriceX96;
+        sqrt = slot0.sqrtPriceX96;
+        source = 'live';
       }
     } catch {
-      // keep indexer value
+      source = stats ? 'indexer' : 'opening';
+    }
+    if (sqrt === 0n) {
+      sqrt = BigInt(sqrtAtLevel(pool.openingLevel));
+      source = 'opening';
     }
 
-    const totalSupplyWei = decimalToBig(state.totalSupply);
-    const fdvEth = sqrtPriceX96
-      ? fdvEthWeiAtSqrtPrice(totalSupplyWei, sqrtPriceX96)
-      : fdvEthWeiAtLevel(totalSupplyWei, level);
-    const ethUsd = await this.oracle.ethUsd(chainId).catch(() => null);
-
-    const progress = curveProgress(state, level);
-
+    const level = levelFromSqrtPrice(sqrt);
+    const totalSupply = BigInt(pool.totalSupply.toFixed());
+    const burned = stats ? BigInt(stats.burnedTotal.toFixed()) : 0n;
+    const circulating = totalSupply - burned;
     return {
-      tokenId: token.id,
+      poolId: pool.poolId,
       chainId,
-      contractAddress: state.contractAddress,
-      poolId: state.poolId,
-      phase: state.phase,
+      token: pool.token,
+      status: pool.status,
       level,
       tick: -level,
-      sqrtPriceX96: sqrtPriceX96 ? sqrtPriceX96.toString() : null,
-      priceEthPerToken: tokenPriceEthString(level, state.decimals),
-      fdvEth: fdvEth.toString(),
-      fdvUsd: ethUsd ? scaleUsd(fdvEth, ethUsd) : null,
-      ethUsd: ethUsd ? ethUsd.toString() : null,
-      openingLevel: state.openingLevel,
-      farLevel: state.farLevel,
-      graduationLevel: state.graduationLevel,
-      progress,
+      sqrtPriceX96: sqrt.toString(),
+      priceEth: sqrtToEthString(sqrt),
+      fdvEthWei: fdvEthWei(sqrt, totalSupply).toString(),
+      mcapEthWei: fdvEthWei(sqrt, circulating).toString(),
+      athPriceEth: stats ? sqrtToEthString(BigInt(stats.athSqrtX96.toFixed())) : null,
+      openingLevel: pool.openingLevel,
+      farLevel: pool.farLevel,
+      graduationLevel: pool.graduationLevel,
+      progress: curveProgress(pool, level),
+      source,
     };
   }
 
-  async quote(
-    tokenRef: string,
-    query: { side: 'BUY' | 'SELL'; amount: string; chainId?: number },
-  ): Promise<QuotePresenter> {
+  async quote(tokenRef: string, query: QuoteQueryDto) {
     const chainId = query.chainId ?? Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
-    const token = await this.resolveToken(chainId, tokenRef);
-    const state = token.projection!;
+    const pool = await this.poolOrThrow(tokenRef, chainId);
     const book = this.registry.book(chainId);
     if (!book.v4Quoter) {
       throw new NotFoundException({
@@ -118,185 +108,116 @@ export class TradingService {
         message: 'V4Quoter address is not configured for this chain',
       });
     }
-
     const client = this.clientFactory.client(chainId);
-    const poolKey = spawnPoolKey(book, state.contractAddress);
+    const poolKey = spawnPoolKey(book, pool.token);
     const amount = BigInt(query.amount);
-    const zeroForOne = query.side === 'BUY'; // ETH in, token out
+    const zeroForOne = query.side === 'BUY';
 
     const [amountOut, gasEstimate] = (await client.readContract({
-      address: book.v4Quoter as `0x${string}`,
+      address: book.v4Quoter as Address,
       abi: V4_QUOTER_ABI,
       functionName: 'quoteExactInputSingle',
       args: [
         {
-          poolKey: poolKey as never,
+          poolKey,
           zeroForOne,
-          exactAmount:
-            amount > 0xffffffffffffffffffffffffffffffffn
-              ? 0xffffffffffffffffffffffffffffffffn
-              : amount,
+          exactAmount: amount,
           hookData: '0x',
         },
       ] as never,
     })) as [bigint, bigint];
-    const inCurrency = zeroForOne ? 'ETH' : token.symbol;
-    const outCurrency = zeroForOne ? token.symbol : 'ETH';
-    const outAmount = amountOut.toString();
 
     return {
-      tokenId: token.id,
+      poolId: pool.poolId,
       chainId,
       side: query.side,
       amountIn: query.amount,
-      amountInCurrency: inCurrency,
-      amountOut: outAmount,
-      amountOutCurrency: outCurrency,
+      amountInCurrency: zeroForOne ? 'ETH' : 'TOKEN',
+      amountOut: amountOut.toString(),
+      amountOutCurrency: zeroForOne ? 'TOKEN' : 'ETH',
       gasEstimate: gasEstimate.toString(),
-      executedPriceNote:
-        'gas estimates taken from a quote are not the same as real swaps (JIT deploys cost gas on execution)',
+      note: 'Quote runs the hook beforeSwap simulation (JIT curve/band deploys included). Gas estimates from a quote are not real-swap gas; re-quote on submission errors.',
     };
   }
 
-  async depth(
-    tokenRef: string,
-    query: { buckets?: number; chainId?: number },
-  ): Promise<DepthPresenter> {
+  async depth(tokenRef: string, query: DepthQueryDto) {
     const chainId = query.chainId ?? Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
-    const token = await this.resolveToken(chainId, tokenRef);
-    const state = token.projection!;
+    const buckets = Math.min(Math.max(query.buckets ?? 8, 1), 32);
+    const pool = await this.poolOrThrow(tokenRef, chainId);
+    const stats = await this.prisma.poolStats.findUnique({
+      where: { chainId_poolId: { chainId, poolId: pool.poolId } },
+    });
+    const sqrt = stats?.lastPriceSqrtX96
+      ? BigInt(stats.lastPriceSqrtX96.toFixed())
+      : BigInt(sqrtAtLevel(pool.openingLevel));
+    const level = levelFromSqrtPrice(sqrt);
+    const totalSupply = BigInt(pool.totalSupply.toFixed());
+    const curveSupply = (totalSupply * 25n) / 100n;
 
-    const template = await this.protocolReads.template(chainId);
-    const level = state.lastPriceLevel ?? state.openingLevel;
-    const totalSupply = decimalToBig(state.totalSupply);
-    const curveSupply = (totalSupply * template.curveSupplyShareWad) / 10n ** 18n;
-
-    const ladder: Array<{
-      index: number;
-      kind: 'CORE' | 'EXTENSION';
-      levelLower: number;
-      levelUpper: number;
-      tokenInventoryRaw: string;
-    }> = [];
-    if (state.phase === 'GRADUATED') {
-      const graduation = state.graduationLevel ?? level;
-      const milestones = await this.prisma.milestone.findMany({
-        where: { tokenId: token.id, chainId, state: { in: ['DEPLOYED'] } },
-        orderBy: { index: 'asc' },
-        take: query.buckets ?? 8,
-      });
-      for (const m of milestones) {
-        ladder.push({
-          index: m.index,
-          kind: m.kind,
-          levelLower: m.levelLower,
-          levelUpper: m.levelUpper,
-          tokenInventoryRaw: m.tokenInventoryRaw.toFixed(),
-        });
-      }
-      void graduation;
-    }
-
-    const curve: Array<{ position: number; startLevel: number; liquidity: string }> = [];
-    if (state.phase === 'BONDING_CURVE') {
-      for (let i = 0; i < template.curvePositions; i += 1) {
-        const start = curvePositionStart(
-          state.openingLevel,
-          state.farLevel,
-          template.curvePositions,
-          i,
-        );
-        if (start < level) continue;
-        curve.push({
+    if (pool.status === 'bonding') {
+      const positions = [];
+      for (let i = 0; i < T.curvePositions; i += 1) {
+        const start = curvePositionStart(pool.openingLevel, pool.farLevel, T.curvePositions, i);
+        if (start <= level) continue;
+        positions.push({
           position: i,
           startLevel: start,
+          endLevel: pool.farLevel,
           liquidity: curvePositionLiquidity(
-            state.openingLevel,
-            state.farLevel,
-            template.curvePositions,
+            pool.openingLevel,
+            pool.farLevel,
+            T.curvePositions,
             curveSupply,
             i,
           ).toString(),
         });
-        if (curve.length >= (query.buckets ?? 8)) break;
+        if (positions.length >= buckets) break;
       }
+      return { poolId: pool.poolId, status: pool.status, level, curvePositions: positions };
     }
 
+    const bands = await this.prisma.band.findMany({
+      where: { chainId, poolId: pool.poolId, status: 'live', levelLower: { gt: level } },
+      orderBy: { levelLower: 'asc' },
+      take: buckets,
+    });
     return {
-      tokenId: token.id,
-      chainId,
-      phase: state.phase,
+      poolId: pool.poolId,
+      status: pool.status,
       level,
-      curve,
-      ladder,
+      graduationLevel: pool.graduationLevel,
+      bands: bands.map((b) => ({
+        index: b.bandIndex,
+        levelLower: b.levelLower,
+        levelUpper: b.levelUpper,
+        liquidity: b.liquidity.toFixed(),
+        tokenInventory: b.tokenInventory.toFixed(),
+      })),
+      fullRange: {
+        liquidity: pool.fullRangeLiq?.toFixed() ?? null,
+        tickLower: FULL_RANGE_TICK_LOWER,
+        tickUpper: FULL_RANGE_TICK_UPPER,
+      },
+      wall: {
+        liquidity: pool.wallLiquidity?.toFixed() ?? null,
+        levelLower: (pool.graduationLevel ?? 0) + 1,
+        levelUpper: (pool.graduationLevel ?? 0) + WALL_WIDTH_LEVELS,
+      },
     };
   }
 }
 
+function sqrtAtLevel(level: number): string {
+  return sqrtPriceAtLevel(level).toString();
+}
+
 function curveProgress(
-  state: {
-    phase: string;
-    openingLevel: number;
-    farLevel: number;
-    curveDeployed: number;
-    curvePositions: number;
-  },
+  pool: { openingLevel: number; farLevel: number; status: string },
   level: number,
 ): number {
-  if (state.phase === 'GRADUATED') return 1;
-  const span = state.farLevel - state.openingLevel;
+  if (pool.status === 'graduated') return 1;
+  const span = pool.farLevel - pool.openingLevel;
   if (span <= 0) return 0;
-  const covered = Math.min(Math.max(level - state.openingLevel, 0), span);
+  const covered = Math.min(Math.max(level - pool.openingLevel, 0), span);
   return covered / span;
 }
-
-function scaleUsd(ethWei: bigint, ethUsd: bigint): string {
-  // USD = eth(wei)/1e18 * usd(8 decimals) / 1e8
-  return ((ethWei * ethUsd) / 10n ** 18n / 10n ** 8n).toString();
-}
-
-export type TokenPricePresenter = {
-  tokenId: string;
-  chainId: number;
-  contractAddress: string;
-  poolId: string;
-  phase: string;
-  level: number;
-  tick: number;
-  sqrtPriceX96: string | null;
-  priceEthPerToken: string;
-  fdvEth: string;
-  fdvUsd: string | null;
-  ethUsd: string | null;
-  openingLevel: number;
-  farLevel: number;
-  graduationLevel: number | null;
-  progress: number;
-};
-
-export type QuotePresenter = {
-  tokenId: string;
-  chainId: number;
-  side: 'BUY' | 'SELL';
-  amountIn: string;
-  amountInCurrency: string;
-  amountOut: string;
-  amountOutCurrency: string;
-  gasEstimate: string;
-  executedPriceNote: string;
-};
-
-export type DepthPresenter = {
-  tokenId: string;
-  chainId: number;
-  phase: string;
-  level: number;
-  curve: Array<{ position: number; startLevel: number; liquidity: string }>;
-  ladder: Array<{
-    index: number;
-    kind: string;
-    levelLower: number;
-    levelUpper: number;
-    tokenInventoryRaw: string;
-  }>;
-};

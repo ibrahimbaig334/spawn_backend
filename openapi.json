@@ -263,9 +263,9 @@
         ]
       }
     },
-    "/api/v1/profiles/{walletAddress}/portfolio": {
+    "/api/v1/profiles/{walletAddress}/revenue-streams": {
       "get": {
-        "operationId": "getProfilePortfolio",
+        "operationId": "getProfileRevenueStreams",
         "parameters": [
           {
             "name": "walletAddress",
@@ -519,7 +519,16 @@
     "/api/v1/launch/relay": {
       "post": {
         "operationId": "relayLaunch",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -532,7 +541,7 @@
         },
         "responses": {
           "202": {
-            "description": ""
+            "description": "Operator-signed launch broadcast; confirm via GET record"
           }
         },
         "summary": "",
@@ -582,9 +591,15 @@
             "name": "state",
             "required": false,
             "in": "query",
-            "description": "Filter by state",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "PENDING_SIGNATURE",
+                "SUBMITTED",
+                "CONFIRMED",
+                "REORGED",
+                "FAILED"
+              ]
             }
           },
           {
@@ -601,7 +616,7 @@
             "name": "page",
             "required": false,
             "in": "query",
-            "description": "Page number (1-based)",
+            "description": "Page",
             "schema": {
               "default": 1,
               "type": "number"
@@ -611,7 +626,7 @@
             "name": "limit",
             "required": false,
             "in": "query",
-            "description": "Page size",
+            "description": "Limit",
             "schema": {
               "default": 20,
               "type": "number"
@@ -798,9 +813,9 @@
         ]
       }
     },
-    "/api/v1/protocol/governance/operations": {
+    "/api/v1/protocol/governance": {
       "get": {
-        "operationId": "listGovernanceOperations",
+        "operationId": "getGovernance",
         "parameters": [],
         "responses": {
           "200": {
@@ -816,6 +831,36 @@
     "/api/v1/protocol/revenue": {
       "get": {
         "operationId": "getProtocolRevenue",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "protocol"
+        ]
+      }
+    },
+    "/api/v1/protocol/revenue/history": {
+      "get": {
+        "operationId": "getRevenueHistory",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "",
+        "tags": [
+          "protocol"
+        ]
+      }
+    },
+    "/api/v1/protocol/stats": {
+      "get": {
+        "operationId": "getProtocolStats",
         "parameters": [],
         "responses": {
           "200": {
@@ -936,7 +981,7 @@
           },
           "totalSupply": {
             "type": "string",
-            "description": "Total supply in token-wei (decimal string)"
+            "description": "Total supply in token-wei; pinned by protocol to 1,000,000,000e18"
           },
           "devBuyShareWad": {
             "type": "string",
@@ -969,15 +1014,10 @@
           "launchId": {
             "type": "string",
             "description": "UUID of the prepared launch record"
-          },
-          "signature": {
-            "type": "string",
-            "description": "65-byte EIP-712 signature over the LaunchConfig (hex)"
           }
         },
         "required": [
-          "launchId",
-          "signature"
+          "launchId"
         ]
       }
     }

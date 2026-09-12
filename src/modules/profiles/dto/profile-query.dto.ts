@@ -13,15 +13,3 @@ export class ProfileTokensQueryDto extends PaginationDto {
   @Min(1)
   chainId = 8453;
 }
-
-export const PORTFOLIO_SORTS = ['value', 'balance', 'recent'] as const;
-
-export class PortfolioQueryDto extends PaginationDto {
-  @IsIn(PORTFOLIO_SORTS)
-  sort: (typeof PORTFOLIO_SORTS)[number] = 'value';
-
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  chainId = 8453;
-}

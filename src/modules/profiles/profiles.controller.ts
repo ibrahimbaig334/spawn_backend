@@ -2,7 +2,7 @@ import { Body, Controller, Get, Param, Put, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RateLimit } from '../../infrastructure/rate-limit/rate-limit.decorator';
 import { RATE_LIMIT_POLICIES } from '../../infrastructure/rate-limit/rate-limit.policy';
-import { PortfolioQueryDto, ProfileTokensQueryDto } from './dto/profile-query.dto';
+import { ProfileTokensQueryDto } from './dto/profile-query.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { ProfilesService } from './profiles.service';
 
@@ -36,12 +36,12 @@ export class ProfilesController {
     return this.profiles.tokens(walletAddress, query);
   }
 
-  @Get(':walletAddress/portfolio')
-  @ApiOperation({ operationId: 'getProfilePortfolio' })
-  portfolio(
+  @Get(':walletAddress/revenue-streams')
+  @ApiOperation({ operationId: 'getProfileRevenueStreams' })
+  revenueStreams(
     @Param('walletAddress') walletAddress: string,
-    @Query() query: PortfolioQueryDto,
+    @Query() query: ProfileTokensQueryDto,
   ): Promise<unknown> {
-    return this.profiles.portfolio(walletAddress, query);
+    return this.profiles.revenueStreams(walletAddress, query);
   }
 }

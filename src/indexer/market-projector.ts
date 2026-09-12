@@ -1,32 +1,27 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, type PrismaService } from '../infrastructure/database/prisma.service';
-import { bigToDecimal, decimalToBig } from './decimal-utils';
-import { toLevel } from '../protocol/protocol-math';
 import type { ProjectorContext } from './projection-applier';
 import type { DecodedPoolManagerEvent } from './event-decoder';
+import { big, ordinalKey } from './ordinal';
+import { candleUpsert, ensurePoolStats, poolStatsAdd, protocolDayVolume } from './aggregates';
 
 /**
- * PoolManager / ERC-20 / RevenueNFT event projectors: the trade tape, OHLCV
- * candles, holdings, circulating supply, and revenue-NFT ownership.
+ * PoolManager / ERC-20 / RevenueNFT appliers: trade tape facts, sqrt-axis
+ * minute/hour/day candles, pool + protocol volume rollups, burns, and
+ * revenue-NFT ownership.
  *
- * Trade semantics (integration guide §8.2):
- * - A buy is `zeroForOne` (ETH in, token out): `Swap.amount0 < 0`, ETH volume is
- *   `-amount0` (includes the 1% fee on the input side), token volume `-amount1`.
- * - A sell is the reverse: token volume `-amount1`, ETH proceeds `amount0`.
- * - `level = -tick` from the swap's end tick.
+ * Swap semantics (backend guide §1): `amount0 < 0` means a BUY (ETH in, the
+ * caller's signed delta is negative). Stored amounts are absolute values;
+ * `is_buy` carries direction. Fees: `input_amount × fee_pips / 1_000_000`.
  */
 
-const CANDLE_INTERVALS: Array<{ key: 'M1' | 'M5' | 'M15' | 'H1' | 'H4' | 'D1'; seconds: number }> =
-  [
-    { key: 'M1', seconds: 60 },
-    { key: 'M5', seconds: 300 },
-    { key: 'M15', seconds: 900 },
-    { key: 'H1', seconds: 3600 },
-    { key: 'H4', seconds: 14400 },
-    { key: 'D1', seconds: 86400 },
-  ];
+const MINUTE = 60_000;
+const HOUR = 3_600_000;
+const DAY = 86_400_000;
 
-export type SwapContext = ProjectorContext & { traderWallet: string | null };
+function floorBucket(ms: number, size: number): Date {
+  return new Date(Math.floor(ms / size) * size);
+}
 
 @Injectable()
 export class MarketProjector {
@@ -36,265 +31,137 @@ export class MarketProjector {
 
   async applySwap(
     tx: Prisma.TransactionClient,
-    ctx: SwapContext,
+    ctx: ProjectorContext,
     event: Extract<DecodedPoolManagerEvent, { name: 'Swap' }>,
   ): Promise<void> {
-    const state = await tx.tokenChainState.findUnique({
+    const pool = await tx.pool.findUnique({
       where: { chainId_poolId: { chainId: ctx.chainId, poolId: event.poolId } },
     });
-    if (!state) return; // not a Spawn pool (hook filter upstream); ignore
+    if (!pool) return; // not a Spawn pool
 
     const isBuy = event.amount0 < 0n;
-    const side: 'BUY' | 'SELL' = isBuy ? 'BUY' : 'SELL';
-    // Signed amounts are caller-perspective deltas including the input-side fee.
-    const quoteAmountRaw = isBuy ? -event.amount0 : event.amount0;
-    const tokenAmountRaw = isBuy ? -event.amount1 : event.amount1;
-    const level = toLevel(event.tick);
+    const ethAbs = isBuy ? -event.amount0 : event.amount0;
+    const tokenAbs = isBuy ? event.amount1 : -event.amount1;
+    const feePips = event.lpFee > 0 ? event.lpFee : 10_000;
+    const inputAmount = isBuy ? ethAbs : tokenAbs;
+    const fee = (inputAmount * BigInt(feePips)) / 1_000_000n;
+    const feeEth = isBuy ? fee : 0n;
+    const feeTokens = isBuy ? 0n : fee;
 
-    const traderWallet = ctx.traderWallet ?? event.sender;
-
-    await tx.trade.create({
+    await tx.swapFact.create({
       data: {
         chainId: ctx.chainId,
+        ordinalKey: ordinalKey(ctx),
+        poolId: event.poolId,
+        sender: event.sender,
+        isBuy,
+        amount0Eth: big(ethAbs),
+        amount1Tokens: big(tokenAbs),
+        sqrtPriceX96: big(event.sqrtPriceX96),
+        tick: event.tick,
+        fee: feePips,
+        feeEth: big(feeEth),
+        feeTokens: big(feeTokens),
         transactionHash: ctx.txHash,
         logIndex: ctx.logIndex,
-        transactionIndex: 0, // filled by the ingest loop when available
-        tokenId: state.tokenId,
-        side,
-        traderWallet,
-        tokenAmountRaw: bigToDecimal(tokenAmountRaw),
-        quoteAmountRaw: bigToDecimal(quoteAmountRaw),
-        priceLevel: level,
-        sqrtPriceX96: bigToDecimal(event.sqrtPriceX96),
-        lpFee: event.lpFee,
         blockNumber: ctx.blockNumber,
-        blockHash: '0x' + '0'.repeat(64), // filled by the ingest loop
-        blockTime: ctx.blockTime,
-        projectionVersion: ctx.version,
+        timestamp: ctx.blockTime,
       },
     });
 
-    await tx.tokenChainState.update({
-      where: { tokenId: state.tokenId },
-      data: {
-        lastPriceLevel: level,
-        lastSqrtPriceX96: bigToDecimal(event.sqrtPriceX96),
-        projectionVersion: ctx.version,
-        sourceBlockNumber: ctx.blockNumber,
-        sourceBlockTime: ctx.blockTime,
+    const buyEth = isBuy ? ethAbs : 0n;
+    const sellEth = isBuy ? 0n : ethAbs;
+    const buyTokens = isBuy ? tokenAbs : 0n;
+    const sellTokens = isBuy ? 0n : tokenAbs;
+
+    await ensurePoolStats(tx, ctx.chainId, event.poolId);
+    await poolStatsAdd(
+      tx,
+      ctx.chainId,
+      event.poolId,
+      {
+        buy_volume_eth: buyEth,
+        sell_volume_eth: sellEth,
+        buy_volume_tokens: buyTokens,
+        sell_volume_tokens: sellTokens,
+        swap_count: 1,
       },
-    });
+      { last_price_sqrt_x96: event.sqrtPriceX96, last_swap_block: ctx.blockNumber },
+      {},
+      { ath_sqrt_x96: event.sqrtPriceX96 },
+    );
 
-    // Candles keyed on ETH volume (quote); USD enrichment happens in the metrics pass.
-    // Levels: open is the first trade's level in the bucket; high/low are running
-    // extremes; close is the latest. Read-then-write (Prisma has no max/min update).
-    for (const interval of CANDLE_INTERVALS) {
-      const bucketStart = new Date(
-        Math.floor(ctx.blockTime.getTime() / (interval.seconds * 1000)) * interval.seconds * 1000,
-      );
-      const volumeEth = bigToDecimal(quoteAmountRaw);
-      const existing = await tx.candle.findUnique({
-        where: {
-          tokenId_chainId_interval_bucketStart: {
-            tokenId: state.tokenId,
-            chainId: ctx.chainId,
-            interval: interval.key,
-            bucketStart,
-          },
-        },
-      });
-      if (!existing) {
-        await tx.candle.create({
-          data: {
-            tokenId: state.tokenId,
-            chainId: ctx.chainId,
-            interval: interval.key,
-            bucketStart,
-            open: level,
-            high: level,
-            low: level,
-            close: level,
-            volumeEth,
-            tradeCount: 1n,
-            projectionVersion: ctx.version,
-          },
-        });
-      } else {
-        await tx.candle.update({
-          where: {
-            tokenId_chainId_interval_bucketStart: {
-              tokenId: state.tokenId,
-              chainId: ctx.chainId,
-              interval: interval.key,
-              bucketStart,
-            },
-          },
-          data: {
-            high: Math.max(existing.high.toNumber(), level),
-            low: Math.min(existing.low.toNumber(), level),
-            close: level,
-            volumeEth: { increment: volumeEth },
-            tradeCount: { increment: 1n },
-            projectionVersion: ctx.version,
-          },
-        });
-      }
-    }
+    const bucketMs = ctx.blockTime.getTime();
+    await candleUpsert(
+      tx,
+      'pool_minute_stats',
+      'minute',
+      ctx.chainId,
+      event.poolId,
+      floorBucket(bucketMs, MINUTE),
+      event.sqrtPriceX96,
+      buyEth,
+      sellEth,
+      buyTokens,
+      sellTokens,
+    );
+    await candleUpsert(
+      tx,
+      'pool_hour_stats',
+      'hour',
+      ctx.chainId,
+      event.poolId,
+      floorBucket(bucketMs, HOUR),
+      event.sqrtPriceX96,
+      buyEth,
+      sellEth,
+      buyTokens,
+      sellTokens,
+    );
+    await candleUpsert(
+      tx,
+      'pool_day_stats',
+      'day',
+      ctx.chainId,
+      event.poolId,
+      floorBucket(bucketMs, DAY),
+      event.sqrtPriceX96,
+      buyEth,
+      sellEth,
+      buyTokens,
+      sellTokens,
+    );
 
-    // Update metrics for all timeframes (trade count + volume accrue per trade).
-    await this.updateMetricCounters(tx, ctx, state.tokenId, quoteAmountRaw);
+    await protocolDayVolume(tx, ctx.chainId, ctx.blockTime, buyEth, sellEth, 1n);
   }
 
-  private async updateMetricCounters(
-    tx: Prisma.TransactionClient,
-    ctx: SwapContext,
-    tokenId: string,
-    quoteAmountRaw: bigint,
-  ): Promise<void> {
-    const volumeEth = bigToDecimal(quoteAmountRaw);
-    for (const timeframe of ['H1', 'H24', 'D7', 'D30', 'ALL'] as const) {
-      await tx.tokenMetric.upsert({
-        where: { tokenId_chainId_timeframe: { tokenId, chainId: ctx.chainId, timeframe } },
-        create: {
-          tokenId,
-          chainId: ctx.chainId,
-          timeframe,
-          volumeEth,
-          tradeCount: 1n,
-          projectionVersion: ctx.version,
-          sourceBlockNumber: ctx.blockNumber,
-          sourceBlockTime: ctx.blockTime,
-        },
-        update: {
-          volumeEth: { increment: volumeEth },
-          tradeCount: { increment: 1n },
-          projectionVersion: ctx.version,
-          sourceBlockNumber: ctx.blockNumber,
-          sourceBlockTime: ctx.blockTime,
-        },
-      });
-    }
-  }
-
-  /** Applies an ERC-20 Transfer on a launch token: holdings, supply on burn, launch-mint. */
+  /** ERC-20 Transfer on a launch token: only burns (to 0x0) are indexed as facts. */
   async applyTokenTransfer(
     tx: Prisma.TransactionClient,
     ctx: ProjectorContext,
     event: { token: string; from: string; to: string; value: bigint },
   ): Promise<void> {
-    const state = await tx.tokenChainState.findUnique({
-      where: { chainId_contractAddress: { chainId: ctx.chainId, contractAddress: event.token } },
+    if (event.to !== '0x0000000000000000000000000000000000000000') return;
+    const pool = await tx.pool.findUnique({
+      where: { chainId_token: { chainId: ctx.chainId, token: event.token } },
     });
-    if (!state) return; // not a launch token
-
-    const ZERO = '0x0000000000000000000000000000000000000000';
-    if (event.from === ZERO && event.to === state.contractAddress) {
-      return; // genesis mint to the hook; supply already recorded at Launched
-    }
-
-    if (event.from === ZERO) {
-      // Any other mint is impossible post-launch per the protocol; ignore defensively.
-      return;
-    }
-
-    if (event.to === ZERO) {
-      // Burn (sell-fee residue, buyback-and-burn): supply falls; holder decrement below.
-      await tx.tokenChainState.update({
-        where: { tokenId: state.tokenId },
-        data: {
-          currentSupply: { decrement: bigToDecimal(event.value) },
-          projectionVersion: ctx.version,
-          sourceBlockNumber: ctx.blockNumber,
-          sourceBlockTime: ctx.blockTime,
-        },
-      });
-      await this.adjustHolding(tx, ctx, state.tokenId, event.from, -event.value);
-      return;
-    }
-
-    if (event.value === 0n) return;
-
-    await this.adjustHolding(tx, ctx, state.tokenId, event.from, -event.value);
-    await this.adjustHolding(tx, ctx, state.tokenId, event.to, event.value);
-  }
-
-  private async adjustHolding(
-    tx: Prisma.TransactionClient,
-    ctx: ProjectorContext,
-    tokenId: string,
-    wallet: string,
-    delta: bigint,
-  ): Promise<void> {
-    const existing = await tx.holding.findUnique({
-      where: {
-        walletAddress_tokenId_chainId: { walletAddress: wallet, tokenId, chainId: ctx.chainId },
-      },
-    });
-    if (!existing) {
-      if (delta < 0n) return; // transfer from a wallet we never saw receive; skip (partial index)
-      await tx.holding.create({
-        data: {
-          walletAddress: wallet,
-          tokenId,
-          chainId: ctx.chainId,
-          balanceRaw: bigToDecimal(delta),
-          lastActivityAt: ctx.blockTime,
-          projectionVersion: ctx.version,
-          sourceBlockNumber: ctx.blockNumber,
-          sourceBlockTime: ctx.blockTime,
-        },
-      });
-      await this.bumpHolderCount(tx, ctx, tokenId, 1n);
-      return;
-    }
-    const next = decimalToBig(existing.balanceRaw) + delta;
-    if (next <= 0n) {
-      await tx.holding.delete({
-        where: {
-          walletAddress_tokenId_chainId: { walletAddress: wallet, tokenId, chainId: ctx.chainId },
-        },
-      });
-      await this.bumpHolderCount(tx, ctx, tokenId, -1n);
-      return;
-    }
-    await tx.holding.update({
-      where: {
-        walletAddress_tokenId_chainId: { walletAddress: wallet, tokenId, chainId: ctx.chainId },
-      },
+    await tx.tokenBurnFact.create({
       data: {
-        balanceRaw: bigToDecimal(next),
-        lastActivityAt: ctx.blockTime,
-        projectionVersion: ctx.version,
-        sourceBlockNumber: ctx.blockNumber,
-        sourceBlockTime: ctx.blockTime,
+        chainId: ctx.chainId,
+        ordinalKey: ordinalKey(ctx),
+        poolId: pool?.poolId ?? null,
+        token: event.token,
+        burner: event.from,
+        amount: big(event.value),
+        transactionHash: ctx.txHash,
+        logIndex: ctx.logIndex,
+        blockNumber: ctx.blockNumber,
+        timestamp: ctx.blockTime,
       },
     });
-  }
-
-  private async bumpHolderCount(
-    tx: Prisma.TransactionClient,
-    ctx: ProjectorContext,
-    tokenId: string,
-    delta: bigint,
-  ): Promise<void> {
-    for (const timeframe of ['ALL'] as const) {
-      await tx.tokenMetric.upsert({
-        where: { tokenId_chainId_timeframe: { tokenId, chainId: ctx.chainId, timeframe } },
-        create: {
-          tokenId,
-          chainId: ctx.chainId,
-          timeframe,
-          holderCount: delta > 0n ? 1n : 0n,
-          tradeCount: 0n,
-          projectionVersion: ctx.version,
-          sourceBlockNumber: ctx.blockNumber,
-          sourceBlockTime: ctx.blockTime,
-        },
-        update: {
-          holderCount: { increment: Number(delta) },
-          projectionVersion: ctx.version,
-        },
-      });
+    if (pool) {
+      await ensurePoolStats(tx, ctx.chainId, pool.poolId);
+      await poolStatsAdd(tx, ctx.chainId, pool.poolId, { burned_total: event.value });
     }
   }
 
@@ -303,24 +170,18 @@ export class MarketProjector {
     tx: Prisma.TransactionClient,
     ctx: ProjectorContext,
     event: { tokenId: bigint; from: string; to: string },
-    poolIdForTokenId: (nftTokenId: bigint) => string | null,
   ): Promise<void> {
-    const poolId = poolIdForTokenId(event.tokenId);
-    if (!poolId) return;
-    const state = await tx.tokenChainState.findUnique({
+    // RevenueNFT.tokenIdOf(poolId) = uint256(poolId) — invert by hex-encoding.
+    const poolId = `0x${event.tokenId.toString(16).padStart(64, '0')}`;
+    const pool = await tx.pool.findUnique({
       where: { chainId_poolId: { chainId: ctx.chainId, poolId } },
     });
-    if (!state) return;
-    const ZERO = '0x0000000000000000000000000000000000000000';
-    await tx.tokenChainState.update({
-      where: { tokenId: state.tokenId },
+    if (!pool) return;
+    await tx.pool.update({
+      where: { chainId_poolId: { chainId: ctx.chainId, poolId } },
       data: {
-        creatorRevenueOwner: event.to === ZERO ? null : event.to,
-        creatorRevenueNftId: bigToDecimal(event.tokenId),
-        revenueNftMintedAt: event.from === ZERO ? ctx.blockTime : state.revenueNftMintedAt,
-        projectionVersion: ctx.version,
-        sourceBlockNumber: ctx.blockNumber,
-        sourceBlockTime: ctx.blockTime,
+        revenueNftOwner: event.to,
+        revenueNftId: big(event.tokenId),
       },
     });
   }

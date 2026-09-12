@@ -20,6 +20,7 @@ const baseConfig = {
   creator: CREATOR,
   name: 'Test Token',
   symbol: 'TST',
+  uri: 'ipfs://bafkreihdwdcefgh4dqkjv67uzcmw7ojhe6xbxqp3tq6f3f3f3f3f3f3f3f',
   totalSupply: 1_000_000_000_000_000_000_000_000n,
   devBuyShareWad: 50_000_000_000_000_000n,
   payoutPlan: 1n,
@@ -36,6 +37,7 @@ describe('launch signature (LaunchSignature.sol port)', () => {
           { name: 'creator', type: 'address' },
           { name: 'name', type: 'string' },
           { name: 'symbol', type: 'string' },
+          { name: 'uri', type: 'string' },
           { name: 'totalSupply', type: 'uint256' },
           { name: 'devBuyShareWad', type: 'uint64' },
           { name: 'payoutPlan', type: 'uint256' },
@@ -47,6 +49,7 @@ describe('launch signature (LaunchSignature.sol port)', () => {
         creator: baseConfig.creator,
         name: baseConfig.name,
         symbol: baseConfig.symbol,
+        uri: baseConfig.uri,
         totalSupply: baseConfig.totalSupply,
         devBuyShareWad: baseConfig.devBuyShareWad,
         payoutPlan: baseConfig.payoutPlan,
@@ -93,15 +96,15 @@ describe('curve geometry (CurveLib port)', () => {
     expect(drift * 10_000n).toBeLessThan(openingFdv);
   });
 
-  it('far level is opening + span and doubles the FDV', () => {
+  it('far level is opening + span and quadruples the FDV (two doublings)', () => {
     const opening = openingLevel(supply, openingFdv);
     const far = farLevel(opening, PROTOCOL_TEMPLATE_DEFAULT.curveSpanLevels);
     expect(far).toBe(opening + PROTOCOL_TEMPLATE_DEFAULT.curveSpanLevels);
     const fdvAtFar = fdvEthWeiAtLevel(supply, far);
     const fdvAtOpen = fdvEthWeiAtLevel(supply, opening);
-    // far = 2x opening within tick granularity (0.1%)
+    // far = 4x opening within tick granularity (0.1%)
     const ratioDrift =
-      fdvAtFar > 2n * fdvAtOpen ? fdvAtFar - 2n * fdvAtOpen : 2n * fdvAtOpen - fdvAtFar;
+      fdvAtFar > 4n * fdvAtOpen ? fdvAtFar - 4n * fdvAtOpen : 4n * fdvAtOpen - fdvAtFar;
     expect(ratioDrift * 1_000n).toBeLessThan(fdvAtFar);
   });
 

@@ -25,16 +25,30 @@ export class ProtocolController {
     return this.protocol.plugins(query);
   }
 
-  @Get('governance/operations')
-  @ApiOperation({ operationId: 'listGovernanceOperations' })
-  operations(@Query() query: { chainId?: number; status?: string }) {
-    return this.protocol.operations(query);
+  @Get('governance')
+  @ApiOperation({ operationId: 'getGovernance' })
+  governance(@Query() query: { chainId?: number; status?: string }) {
+    return this.protocol.governance(query);
   }
 
   @Get('revenue')
   @ApiOperation({ operationId: 'getProtocolRevenue' })
   revenue(@Query() query: { chainId?: number }) {
     return this.protocol.revenue(query);
+  }
+
+  @Get('revenue/history')
+  @ApiOperation({ operationId: 'getRevenueHistory' })
+  revenueHistory(
+    @Query() query: { chainId?: number; kind?: string; poolId?: string; limit?: number },
+  ) {
+    return this.protocol.revenueHistory(query);
+  }
+
+  @Get('stats')
+  @ApiOperation({ operationId: 'getProtocolStats' })
+  stats(@Query() query: { chainId?: number }) {
+    return this.protocol.stats(query);
   }
 
   @Get('watermark')

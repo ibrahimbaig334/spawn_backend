@@ -1,19 +1,9 @@
-import { Transform, Type } from 'class-transformer';
-import { IsDateString, IsEnum, IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
-import { CandleInterval, MilestoneKind, MilestoneState } from '@prisma/client';
-import { PaginationDto } from '../../../common/pagination/pagination.dto';
+import { Type } from 'class-transformer';
+import { IsDateString, IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
+import 'reflect-metadata';
 
 export const API_CANDLE_INTERVALS = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
 export type ApiCandleInterval = (typeof API_CANDLE_INTERVALS)[number];
-
-export const PRISMA_CANDLE_INTERVALS: Record<ApiCandleInterval, CandleInterval> = {
-  '1m': CandleInterval.M1,
-  '5m': CandleInterval.M5,
-  '15m': CandleInterval.M15,
-  '1h': CandleInterval.H1,
-  '4h': CandleInterval.H4,
-  '1d': CandleInterval.D1,
-};
 
 export class TokenCandlesQueryDto {
   @IsIn(API_CANDLE_INTERVALS)
@@ -39,59 +29,65 @@ export class TokenCandlesQueryDto {
   chainId = 8453;
 }
 
-export class TokenMilestonesQueryDto extends PaginationDto {
-  @IsOptional()
-  @Transform(({ value }) => normalizeEnum(value))
-  @IsEnum(MilestoneKind)
-  kind?: MilestoneKind;
+export class TokenMilestonesQueryDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page = 1;
 
-  @IsOptional()
-  @Transform(({ value }) => normalizeEnum(value))
-  @IsEnum(MilestoneState)
-  state?: MilestoneState;
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit = 50;
 
   @Type(() => Number)
   @IsInt()
   @Min(1)
   chainId = 8453;
+
+  get skip(): number {
+    return (this.page - 1) * this.limit;
+  }
 }
 
-export const RevenueEventKinds = [
-  'CreatorAccrued',
-  'CreatorClaimed',
-  'CreatorPathAccrued',
-  'CreatorPathClaimed',
-  'CreatorPathClaimFailed',
-  'ProtocolAccrued',
-  'ProtocolClaimed',
-  'PayoutPotFunded',
-  'PayoutPotRedeemed',
-  'PayoutTipPaid',
-  'PluginPayoutDelivered',
-  'PluginPayoutCarried',
-  'PluginPayoutRedirected',
-  'FeesCollected',
-  'FeesRouted',
-  'Graduated',
-  'DevBuyExecuted',
-  'DevBuySkipped',
+export const REVENUE_EVENT_KINDS = [
+  'creatorAccruals',
+  'protocolAccruals',
+  'creatorPathAccruals',
+  'claims',
+  'payoutTips',
+  'pluginPayouts',
+  'potFundings',
+  'potRedemptions',
+  'feeCollections',
+  'feeRoutings',
+  'tokenBurns',
+  'graduates',
 ] as const;
 
-export class TokenRevenueQueryDto extends PaginationDto {
-  @IsOptional()
-  @IsIn(RevenueEventKinds)
-  kind?: string;
+export class TokenRevenueQueryDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page = 1;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit = 25;
 
   @IsOptional()
-  @IsDateString({ strict: true })
-  from?: string;
+  @IsIn(REVENUE_EVENT_KINDS)
+  kind?: string;
 
   @Type(() => Number)
   @IsInt()
   @Min(1)
   chainId = 8453;
-}
 
-function normalizeEnum(value: unknown): unknown {
-  return typeof value === 'string' ? value.toUpperCase() : value;
+  get skip(): number {
+    return (this.page - 1) * this.limit;
+  }
 }

@@ -62,7 +62,7 @@ export class CommentsService {
           const id = randomUUID();
           if (input.parentCommentId) {
             const parent = await tx.comment.findUnique({ where: { id: input.parentCommentId } });
-            if (!parent || parent.tokenId !== tokenId)
+            if (!parent || parent.tokenDbId !== tokenId)
               throw new NotFoundException({ code: 'COMMENT_PARENT_NOT_FOUND' });
             if (parent.isDeleted) throw new ConflictException({ code: 'COMMENT_PARENT_DELETED' });
             if (parent.depth >= 3) throw new ConflictException({ code: 'COMMENT_MAX_DEPTH' });
@@ -70,7 +70,7 @@ export class CommentsService {
           const created = await tx.comment.create({
             data: {
               id,
-              tokenId,
+              tokenDbId: tokenId,
               walletAddress: input.walletAddress,
               parentId: input.parentCommentId,
               rootId: id,
@@ -117,7 +117,7 @@ export class CommentsService {
     const key = this.cacheKey(`comments:${tokenId}:${generation}:roots`, query);
     const cached = await this.cache.get<PageResult<unknown>>(key);
     if (cached) return cached;
-    const where: Prisma.CommentWhereInput = { tokenId, parentId: null };
+    const where: Prisma.CommentWhereInput = { tokenDbId: tokenId, parentId: null };
     const orderBy: Prisma.CommentOrderByWithRelationInput[] =
       query.sort === 'oldest'
         ? [{ createdAt: 'asc' }, { id: 'asc' }]
@@ -148,9 +148,9 @@ export class CommentsService {
 
   async replies(commentId: string, query: CommentRepliesQueryDto): Promise<PageResult<unknown>> {
     const comment = await this.requireComment(commentId);
-    const generation = await this.commentGeneration(comment.tokenId);
+    const generation = await this.commentGeneration(comment.tokenDbId);
     const key = this.cacheKey(
-      `comments:${comment.tokenId}:${generation}:replies:${commentId}`,
+      `comments:${comment.tokenDbId}:${generation}:replies:${commentId}`,
       query,
     );
     const cached = await this.cache.get<PageResult<unknown>>(key);
@@ -188,14 +188,14 @@ export class CommentsService {
             data: { replyCount: { decrement: 1 } },
           });
         }
-        const generation = await advanceCommentCacheGeneration(tx, comment.tokenId);
+        const generation = await advanceCommentCacheGeneration(tx, comment.tokenDbId);
         return { deleted, generation };
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
     if (result.generation !== null) {
       await this.cache.applyGeneration(
-        commentCacheDomain(result.deleted.tokenId),
+        commentCacheDomain(result.deleted.tokenDbId),
         result.generation,
       );
     }
@@ -218,10 +218,10 @@ export class CommentsService {
     return { value: comment, replayed: true };
   }
 
-  private async requireComment(commentId: string): Promise<{ tokenId: string }> {
+  private async requireComment(commentId: string): Promise<{ tokenDbId: string }> {
     const comment = await this.prisma.comment.findUnique({
       where: { id: commentId },
-      select: { tokenId: true },
+      select: { tokenDbId: true },
     });
     if (!comment) throw new NotFoundException({ code: 'COMMENT_NOT_FOUND' });
     return comment;

@@ -1,53 +1,79 @@
 import {
-  toLevel,
-  toTick,
-  levelRangeToTicks,
   bandLevels,
   perBandInventory,
+  ladderSupply,
   sizeInventory,
-  divToDecimalString,
-  fdvEthWeiAtLevel,
-  fdvEthWeiAtSqrtPrice,
-  sqrtPriceAtLevel,
+  openingLevel,
+  farLevel,
 } from '../src/protocol/protocol-math';
-import { MAX_LEVEL } from '../src/protocol/protocol-constants';
+import {
+  FIXED_TOTAL_SUPPLY,
+  MAX_LEVEL,
+  PROTOCOL_TEMPLATE_DEFAULT as T,
+} from '../src/protocol/protocol-constants';
 
-describe('orientation', () => {
-  it('level = -tick round trips', () => {
-    expect(toLevel(1234)).toBe(-1234);
-    expect(toTick(-1234)).toBe(1234);
-    expect(toLevel(toTick(7))).toBe(7);
+const FIRST = T.bandFirstStepLevels; // 6932
+const DECAY = T.bandStepDecayLevels; // 391
+const SPACING = T.bandLevelSpacing; // 2235
+const WIDTH = T.bandWidthLevels; // 447
+
+function levels(i: number, grad = 186_449) {
+  return bandLevels(grad, FIRST, DECAY, SPACING, WIDTH, i);
+}
+
+describe('ladder geometry (decaying schedule, LadderLib closed form)', () => {
+  it('first band sits exactly a 2x step (6932 levels) above graduation', () => {
+    expect(levels(0).levelLower).toBe(186_449 + 6932);
+    expect(levels(0).levelUpper).toBe(186_449 + 6932 + 447);
   });
 
-  it('level range to ticks swaps the bounds', () => {
-    const { tickLower, tickUpper } = levelRangeToTicks(100, 200);
-    expect(tickLower).toBe(-200);
-    expect(tickUpper).toBe(-100);
-    expect(() => levelRangeToTicks(200, 200)).toThrow();
+  it('successive steps shrink by 391 levels to the 2235 floor (LadderLib closed form)', () => {
+    // gap(band i -> band i+1) = max(floor, first - decay*(i+1)); k=(6932-2235)/391=12
+    for (let i = 0; i < 12; i += 1) {
+      const gap = levels(i + 1).levelLower - levels(i).levelLower;
+      expect(gap).toBe(Math.max(SPACING, FIRST - DECAY * (i + 1)));
+    }
+    expect(levels(12).levelLower - levels(11).levelLower).toBe(2240);
+    expect(levels(13).levelLower - levels(12).levelLower).toBe(SPACING);
+    for (let i = 14; i < 22; i += 1) {
+      expect(levels(i).levelLower - levels(i - 1).levelLower).toBe(SPACING);
+    }
+  });
+
+  it('22-band core ladder tops out near 2900x graduation', () => {
+    const last = levels(T.coreBandCount - 1);
+    const offset = last.levelLower - 186_449;
+    // closed form at m=22 with k=12: first*13 - decay*12*13/2 + (22-13)*2235
+    expect(offset).toBe(6932 * 13 - (391 * 12 * 13) / 2 + 9 * 2235);
+    expect(Math.pow(1.0001, offset)).toBeGreaterThan(2500);
+    expect(Math.pow(1.0001, offset)).toBeLessThan(3300);
+    expect(last.exists).toBe(true);
+  });
+
+  it('reports exists=false past tick space', () => {
+    expect(bandLevels(MAX_LEVEL - 10, FIRST, DECAY, SPACING, WIDTH, 5).exists).toBe(false);
   });
 });
 
-describe('ladder geometry (LadderLib port)', () => {
-  it('band i sits (i+1) spacings above graduation with a 447-level wall', () => {
-    const graduation = -50_000;
-    const band0 = bandLevels(graduation, 2235, 447, 0);
-    expect(band0.levelLower).toBe(graduation + 2235);
-    expect(band0.levelUpper).toBe(band0.levelLower + 447);
-    const band9 = bandLevels(graduation, 2235, 447, 9);
-    expect(band9.levelLower).toBe(graduation + 10 * 2235);
+describe('supply arithmetic with the pinned 1e27 supply', () => {
+  const supply = BigInt(FIXED_TOTAL_SUPPLY);
+
+  it('ladder share is 10% and per-core-band ~4.545M tokens', () => {
+    const ladder = ladderSupply(supply, BigInt(T.ladderSupplyShareWad));
+    expect(ladder).toBe(supply / 10n);
+    const perBand = perBandInventory(supply, BigInt(T.ladderSupplyShareWad), T.coreBandCount);
+    expect(perBand).toBe(ladder / 22n);
   });
 
-  it('reports exists=false past MAX_LEVEL', () => {
-    const last = bandLevels(MAX_LEVEL - 10_000, 2235, 447, 5);
-    expect(last.exists).toBe(false);
+  it('opening level anchors a 2 ETH FDV on the pinned supply', () => {
+    const opening = openingLevel(supply, BigInt(T.openingFdvWei));
+    // price at opening = 2e18 / 1e27 = 2e-9 ETH per token => tick = log_1.0001(5e8)
+    const far = farLevel(opening, T.curveSpanLevels);
+    expect(far - opening).toBe(13862);
   });
+});
 
-  it('per-band inventory divides the ladder supply evenly', () => {
-    const supply = 1_000_000n * 10n ** 18n;
-    const perBand = perBandInventory(supply, 650_000_000_000_000_000n, 30); // 0.65e18 WAD share
-    expect(perBand).toBe((supply * 65n) / 100n / 30n);
-  });
-
+describe('band inventory caps', () => {
   it('sizeInventory caps at perBand * capMultiple and carries the rest', () => {
     const { amount, carried } = sizeInventory(500n, 100n, 2);
     expect(amount).toBe(200n);
@@ -55,30 +81,5 @@ describe('ladder geometry (LadderLib port)', () => {
     const under = sizeInventory(150n, 100n, 2);
     expect(under.amount).toBe(150n);
     expect(under.carried).toBe(0n);
-  });
-});
-
-describe('fdv math', () => {
-  it('computes fdv identically from level or from the exact sqrt price', () => {
-    const supply = 1_000_000n * 10n ** 18n;
-    const level = -50_000;
-    const fromLevel = fdvEthWeiAtLevel(supply, level);
-    const fromSqrt = fdvEthWeiAtSqrtPrice(supply, sqrtPriceAtLevel(level));
-    expect(fromLevel).toBe(fromSqrt);
-  });
-
-  it('is monotonically increasing in level', () => {
-    const supply = 1_000_000n * 10n ** 18n;
-    const low = fdvEthWeiAtLevel(supply, -80_000);
-    const high = fdvEthWeiAtLevel(supply, -70_000);
-    expect(high).toBeGreaterThan(low);
-  });
-});
-
-describe('divToDecimalString', () => {
-  it('formats exact 18-decimal fractions', () => {
-    expect(divToDecimalString(125n, 1_000_000n, 18)).toBe('0.000125000000000000');
-    expect(divToDecimalString(1n, 1n, 2)).toBe('1.00');
-    expect(divToDecimalString(7n, 2n, 1)).toBe('3.5');
   });
 });

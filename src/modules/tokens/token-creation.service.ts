@@ -39,12 +39,12 @@ export interface CreatedToken {
   chainId: number;
   name: string;
   symbol: string;
-  description: string;
-  claimedCreatorWallet: string;
-  imageUri: string;
+  description: string | null;
+  claimedCreatorWallet: string | null;
+  imageUri: string | null;
   socials: CreateTokenInput['socials'] | Prisma.JsonValue | null;
-  ipfsUri: string;
-  gatewayUrl: string;
+  ipfsUri: string | null;
+  gatewayUrl: string | null;
   contractAddress: null;
   createdAt: Date;
 }

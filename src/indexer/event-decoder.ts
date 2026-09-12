@@ -1,11 +1,8 @@
 import { type Log, decodeEventLog } from 'viem';
 import { MILESTONE_HOOK_ABI } from '../infrastructure/blockchain/contract-abis';
-import { topicByName } from '../infrastructure/blockchain/event-topics';
 
 /**
- * Decodes raw logs into typed protocol events using the curated hook ABI. Only
- * events emitted by the configured hook (or PoolManager, ERC20 tokens, NFT) with a
- * known topic0 are decoded; unknown topics are stored verbatim in the raw ledger.
+ * Decodes raw logs into typed protocol events using the curated hook ABI.
  */
 
 export type DecodedHookEvent =
@@ -14,6 +11,9 @@ export type DecodedHookEvent =
       poolId: string;
       creator: string;
       token: string;
+      tokenName: string;
+      symbol: string;
+      uri: string;
       totalSupply: bigint;
       openingLevel: number;
       farLevel: number;
@@ -56,6 +56,7 @@ export type DecodedHookEvent =
       creatorQuote: bigint;
       protocolQuote: bigint;
       fullRangeLiquidity: bigint;
+      wallLiquidity: bigint;
     }
   | {
       name: 'PayoutPotFunded';
@@ -67,7 +68,7 @@ export type DecodedHookEvent =
       economicVersion: bigint;
     }
   | { name: 'PayoutPotRedeemed'; poolId: string; amount: bigint }
-  | { name: 'PayoutTipPaid'; poolId: string; flusher: string; amount: bigint }
+  | { name: 'PayoutTipPaid'; poolId: string; recipient: string; amount: bigint }
   | {
       name: 'PluginPayoutDelivered';
       poolId: string;
@@ -130,7 +131,8 @@ export type DecodedHookEvent =
       quoteCreatorShareWad: bigint;
       tokenMilestoneFundShareWad: bigint;
     }
-  | { name: 'ProtocolRecipientSet'; recipient: string };
+  | { name: 'ProtocolRecipientSet'; recipient: string }
+  | { name: 'TrustedOperatorSet'; operator: string };
 
 export type DecodedPoolManagerEvent =
   | {
@@ -145,15 +147,6 @@ export type DecodedPoolManagerEvent =
       tick: number;
     }
   | {
-      name: 'ModifyLiquidity';
-      poolId: string;
-      sender: string;
-      tickLower: number;
-      tickUpper: number;
-      liquidityDelta: bigint;
-      salt: string;
-    }
-  | {
       name: 'Swap';
       poolId: string;
       sender: string;
@@ -165,6 +158,18 @@ export type DecodedPoolManagerEvent =
       lpFee: number;
     };
 
+function hex(value: unknown): string {
+  return String(value).toLowerCase();
+}
+
+function big(value: unknown): bigint {
+  return value as bigint;
+}
+
+function num(value: unknown): number {
+  return Number(value);
+}
+
 export function decodeHookEvent(log: Log): DecodedHookEvent | null {
   if (!log.topics[0]) return null;
   const decoded = decodeEventLog({
@@ -172,14 +177,17 @@ export function decodeHookEvent(log: Log): DecodedHookEvent | null {
     data: log.data,
     topics: log.topics,
   }) as unknown as { eventName: string; args: Record<string, unknown> };
-  const args = decoded.args as Record<string, bigint | string | number | boolean>;
+  const args = decoded.args;
   switch (decoded.eventName) {
     case 'Launched':
       return {
         name: 'Launched',
         poolId: hex(args.poolId),
-        creator: addr(args.creator),
-        token: addr(args.token),
+        creator: hex(args.creator),
+        token: hex(args.token),
+        tokenName: String(args.name),
+        symbol: String(args.symbol),
+        uri: String(args.uri),
         totalSupply: big(args.totalSupply),
         openingLevel: num(args.openingLevel),
         farLevel: num(args.farLevel),
@@ -203,7 +211,7 @@ export function decodeHookEvent(log: Log): DecodedHookEvent | null {
       return {
         name: 'DevBuySkipped',
         poolId: hex(args.poolId),
-        relayer: addr(args.relayer),
+        relayer: hex(args.relayer),
         tokensRequested: big(args.tokensRequested),
       };
     case 'CurvePositionsDeployed':
@@ -250,6 +258,7 @@ export function decodeHookEvent(log: Log): DecodedHookEvent | null {
         creatorQuote: big(args.creatorQuote),
         protocolQuote: big(args.protocolQuote),
         fullRangeLiquidity: big(args.fullRangeLiquidity),
+        wallLiquidity: big(args.wallLiquidity),
       };
     case 'PayoutPotFunded':
       return {
@@ -267,7 +276,7 @@ export function decodeHookEvent(log: Log): DecodedHookEvent | null {
       return {
         name: 'PayoutTipPaid',
         poolId: hex(args.poolId),
-        flusher: addr(args.flusher),
+        recipient: hex(args.recipient),
         amount: big(args.amount),
       };
     case 'PluginPayoutDelivered':
@@ -275,7 +284,7 @@ export function decodeHookEvent(log: Log): DecodedHookEvent | null {
         name: 'PluginPayoutDelivered',
         poolId: hex(args.poolId),
         pluginIndex: num(args.pluginIndex),
-        plugin: addr(args.plugin),
+        plugin: hex(args.plugin),
         currentShare: big(args.currentShare),
         previousCarry: big(args.previousCarry),
         delivered: big(args.delivered),
@@ -285,7 +294,7 @@ export function decodeHookEvent(log: Log): DecodedHookEvent | null {
         name: 'PluginPayoutCarried',
         poolId: hex(args.poolId),
         pluginIndex: num(args.pluginIndex),
-        plugin: addr(args.plugin),
+        plugin: hex(args.plugin),
         currentShare: big(args.currentShare),
         previousCarry: big(args.previousCarry),
         carried: big(args.carried),
@@ -305,14 +314,14 @@ export function decodeHookEvent(log: Log): DecodedHookEvent | null {
       return {
         name: 'CreatorPathClaimed',
         poolId: hex(args.poolId),
-        holder: addr(args.holder),
+        holder: hex(args.holder),
         amount: big(args.amount),
       };
     case 'CreatorPathClaimFailed':
       return {
         name: 'CreatorPathClaimFailed',
         poolId: hex(args.poolId),
-        holder: addr(args.holder),
+        holder: hex(args.holder),
         amount: big(args.amount),
       };
     case 'CreatorAccrued':
@@ -327,7 +336,7 @@ export function decodeHookEvent(log: Log): DecodedHookEvent | null {
       return {
         name: 'CreatorClaimed',
         poolId: hex(args.poolId),
-        holder: addr(args.holder),
+        holder: hex(args.holder),
         amount: big(args.amount),
       };
     case 'ProtocolAccrued':
@@ -339,12 +348,12 @@ export function decodeHookEvent(log: Log): DecodedHookEvent | null {
         economicVersion: big(args.economicVersion),
       };
     case 'ProtocolClaimed':
-      return { name: 'ProtocolClaimed', recipient: addr(args.recipient), amount: big(args.amount) };
+      return { name: 'ProtocolClaimed', recipient: hex(args.recipient), amount: big(args.amount) };
     case 'FeesCollected':
       return {
         name: 'FeesCollected',
         poolId: hex(args.poolId),
-        caller: addr(args.caller),
+        caller: hex(args.caller),
         quoteFees: big(args.quoteFees),
         tokenFees: big(args.tokenFees),
       };
@@ -367,30 +376,87 @@ export function decodeHookEvent(log: Log): DecodedHookEvent | null {
         tokenMilestoneFundShareWad: big(args.tokenMilestoneFundShareWad),
       };
     case 'ProtocolRecipientSet':
-      return { name: 'ProtocolRecipientSet', recipient: addr(args.recipient) };
+      return { name: 'ProtocolRecipientSet', recipient: hex(args.recipient) };
+    case 'TrustedOperatorSet':
+      return { name: 'TrustedOperatorSet', operator: hex(args.operator) };
     default:
       return null;
   }
 }
 
-function hex(value: unknown): string {
-  return String(value).toLowerCase();
-}
+export const POOL_MANAGER_SWAP_ABI = [
+  {
+    type: 'event',
+    name: 'Swap',
+    anonymous: false,
+    inputs: [
+      { type: 'bytes32', name: 'poolId', indexed: true },
+      { type: 'address', name: 'sender', indexed: true },
+      { type: 'int128', name: 'amount0', indexed: false },
+      { type: 'int128', name: 'amount1', indexed: false },
+      { type: 'uint160', name: 'sqrtPriceX96', indexed: false },
+      { type: 'uint128', name: 'liquidity', indexed: false },
+      { type: 'int24', name: 'tick', indexed: false },
+      { type: 'uint24', name: 'lpFee', indexed: false },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'Initialize',
+    anonymous: false,
+    inputs: [
+      { type: 'bytes32', name: 'poolId', indexed: true },
+      { type: 'address', name: 'currency0', indexed: true },
+      { type: 'address', name: 'currency1', indexed: true },
+      { type: 'uint24', name: 'fee', indexed: false },
+      { type: 'int24', name: 'tickSpacing', indexed: false },
+      { type: 'address', name: 'hooks', indexed: false },
+      { type: 'uint160', name: 'sqrtPriceX96', indexed: false },
+      { type: 'int24', name: 'tick', indexed: false },
+    ],
+  },
+] as const;
 
-function addr(value: unknown): string {
-  return String(value).toLowerCase();
-}
-
-function big(value: unknown): bigint {
-  return value as bigint;
-}
-
-function num(value: unknown): number {
-  return Number(value);
-}
-
-export function hookTopicSet(): `0x${string}`[] {
-  return MILESTONE_HOOK_ABI.filter((entry) => entry.type === 'event')
-    .map((entry) => topicByName((entry as { name: string }).name)?.topic0)
-    .filter((t): t is `0x${string}` => Boolean(t));
+export function decodePoolManagerEvent(log: Log): DecodedPoolManagerEvent | null {
+  if (!log.topics[0]) return null;
+  try {
+    const decoded = decodeEventLog({
+      abi: POOL_MANAGER_SWAP_ABI,
+      data: log.data,
+      topics: log.topics,
+    }) as unknown as {
+      eventName: string;
+      args: Record<string, unknown>;
+    };
+    const args = decoded.args;
+    if (decoded.eventName === 'Swap') {
+      return {
+        name: 'Swap',
+        poolId: hex(args.poolId),
+        sender: hex(args.sender),
+        amount0: big(args.amount0),
+        amount1: big(args.amount1),
+        sqrtPriceX96: big(args.sqrtPriceX96),
+        liquidity: big(args.liquidity),
+        tick: num(args.tick),
+        lpFee: num(args.lpFee),
+      };
+    }
+    if (decoded.eventName === 'Initialize') {
+      return {
+        name: 'Initialize',
+        poolId: hex(args.poolId),
+        currency0: hex(args.currency0),
+        currency1: hex(args.currency1),
+        fee: num(args.fee),
+        tickSpacing: num(args.tickSpacing),
+        hooks: hex(args.hooks),
+        sqrtPriceX96: big(args.sqrtPriceX96),
+        tick: num(args.tick),
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }

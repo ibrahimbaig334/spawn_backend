@@ -1,5 +1,4 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { Prisma, Timeframe } from '@prisma/client';
 import { APP_ENVIRONMENT } from '../../config/config.constants';
 import type { Environment } from '../../config/environment';
 import { CACHE_MANAGER } from '../../infrastructure/cache/cache.constants';
@@ -7,37 +6,11 @@ import { CACHE_TTL_SECONDS } from '../../infrastructure/cache/cache-ttl';
 import type { DomainCachePort } from '../../infrastructure/cache/domain-cache.port';
 import { PrismaService } from '../../infrastructure/database/prisma.service';
 
-interface RankedToken {
-  tokenId: string;
-  name: string;
-  symbol: string;
-  imageUri: string;
-  claimedCreatorWallet: string;
-  onchain: Record<string, unknown>;
-  metrics: Record<string, unknown>;
-  featuredScore: number;
-}
-
-interface FeaturedCandidate {
-  id: string;
-  name: string;
-  symbol: string;
-  imageUri: string;
-  claimedCreatorWallet: string;
-  chain: {
-    phase: string;
-    contractAddress: string;
-    poolId: string;
-    completedCoreMilestones: number;
-    completedExtensionMilestones: number;
-  };
-  volumeUsd: Prisma.Decimal | null;
-  volumeEth: Prisma.Decimal | null;
-  marketCapUsd: Prisma.Decimal | null;
-  marketCapEth: Prisma.Decimal | null;
-  tradeCount: bigint | null;
-  holderCount: bigint | null;
-}
+/**
+ * Featured tokens: the top 3 pools by 24h volume from the `leaderboard_daily`
+ * materialized view (refreshed by the indexer/worker every 30s). Empty when the
+ * indexer is stale (featured must always be live data).
+ */
 
 @Injectable()
 export class FeaturedTokensService {
@@ -51,153 +24,34 @@ export class FeaturedTokensService {
     this.staleAfterMs = environment.CHAIN_STALE_AFTER_SECONDS * 1_000;
   }
 
-  async find(chainId: number): Promise<RankedToken[]> {
+  async find(chainId: number): Promise<FeaturedRow[]> {
     const key = `tokens:featured:${chainId}`;
-    const cached = await this.cache.get<RankedToken[]>(key);
+    const cached = await this.cache.get<FeaturedRow[]>(key);
     if (cached) return cached;
-    const result = await this.prisma.$transaction(
-      async (tx) => {
-        const watermark = await tx.chainWatermark.findUnique({ where: { chainId } });
-        if (!watermark || Date.now() - watermark.blockTime.getTime() > this.staleAfterMs) return [];
-        const rows = await tx.token.findMany({
-          where: {
-            chainId,
-            projection: {
-              chainId,
-              projectionVersion: { lte: watermark.committedVersion },
-            },
-          },
-          include: {
-            projection: true,
-            metrics: {
-              where: {
-                chainId,
-                timeframe: Timeframe.H24,
-                projectionVersion: { lte: watermark.committedVersion },
-              },
-              take: 1,
-            },
-          },
-        });
-        const candidates: FeaturedCandidate[] = rows.flatMap((row) => {
-          const state = row.projection;
-          if (!state) return [];
-          const metric = row.metrics[0];
-          return [
-            {
-              id: row.id,
-              name: row.name,
-              symbol: row.symbol,
-              imageUri: row.imageUri,
-              claimedCreatorWallet: row.claimedCreatorWallet,
-              chain: {
-                phase: state.phase,
-                contractAddress: state.contractAddress,
-                poolId: state.poolId,
-                completedCoreMilestones: state.completedMilestones,
-                completedExtensionMilestones: state.completedExtensionMilestones,
-              },
-              volumeUsd: metric?.volumeUsd ?? null,
-              volumeEth: metric?.volumeEth ?? null,
-              marketCapUsd: metric?.marketCapUsd ?? null,
-              marketCapEth: metric?.marketCapEth ?? null,
-              tradeCount: metric?.tradeCount ?? null,
-              holderCount: metric?.holderCount ?? null,
-            },
-          ];
-        });
-        return candidates
-          .map((candidate) => this.rank(candidate, candidates))
-          .sort(
-            (left, right) =>
-              right.featuredScore - left.featuredScore ||
-              compareDecimal(right.metrics.volumeUsd, left.metrics.volumeUsd) ||
-              compareDecimal(right.metrics.marketCapUsd, left.metrics.marketCapUsd) ||
-              left.tokenId.localeCompare(right.tokenId),
-          )
-          .slice(0, 3);
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
-    );
-    await this.cache.set(key, result, { ttlSeconds: CACHE_TTL_SECONDS.featured });
-    return result;
-  }
 
-  private rank(candidate: FeaturedCandidate, population: FeaturedCandidate[]): RankedToken {
-    const volume = percentile(candidate, population, (item) => item.volumeUsd ?? item.volumeEth);
-    const marketCap = percentile(
-      candidate,
-      population,
-      (item) => item.marketCapUsd ?? item.marketCapEth,
+    const watermark = await this.prisma.chainWatermark.findUnique({ where: { chainId } });
+    if (!watermark || Date.now() - watermark.blockTime.getTime() > this.staleAfterMs) {
+      return [];
+    }
+    const rows = await this.prisma.$queryRawUnsafe<FeaturedRow[]>(
+      `SELECT "pool_id", token, creator, status, name, symbol,
+              "daily_volume_eth"::text AS "daily_volume_eth",
+              "total_volume_eth"::text AS "total_volume_eth"
+       FROM leaderboard_daily WHERE "chain_id" = ${chainId}
+       ORDER BY "daily_volume_eth" DESC LIMIT 3`,
     );
-    const trades = percentile(candidate, population, (item) => item.tradeCount);
-    const holders = percentile(candidate, population, (item) => item.holderCount);
-    const progress = Math.min(
-      1,
-      (candidate.chain.completedCoreMilestones + candidate.chain.completedExtensionMilestones) / 60,
-    );
-    const featuredScore = Math.round(
-      1_000_000 *
-        (0.35 * volume + 0.25 * marketCap + 0.2 * trades + 0.1 * holders + 0.1 * progress),
-    );
-    return {
-      tokenId: candidate.id,
-      name: candidate.name,
-      symbol: candidate.symbol,
-      imageUri: candidate.imageUri,
-      claimedCreatorWallet: candidate.claimedCreatorWallet,
-      featuredScore,
-      onchain: candidate.chain,
-      metrics: {
-        timeframe: Timeframe.H24,
-        volumeUsd: candidate.volumeUsd,
-        marketCapUsd: candidate.marketCapUsd,
-        tradeCount: candidate.tradeCount,
-        holderCount: candidate.holderCount,
-      },
-    };
+    await this.cache.set(key, rows, { ttlSeconds: CACHE_TTL_SECONDS.featured });
+    return rows;
   }
 }
 
-type RankValue = Prisma.Decimal | bigint | null;
-
-function percentile(
-  candidate: FeaturedCandidate,
-  population: FeaturedCandidate[],
-  select: (item: FeaturedCandidate) => RankValue,
-): number {
-  const current = select(candidate);
-  if (current === null || isZero(current)) return 0;
-  if (population.length <= 1) return 1;
-  const below = population.reduce((count, item) => {
-    const value = select(item);
-    return count + (compareRankValues(value, current) < 0 ? 1 : 0);
-  }, 0);
-  return below / (population.length - 1);
-}
-
-function compareRankValues(left: RankValue, right: RankValue): number {
-  if (left === null) return right === null ? 0 : -1;
-  if (right === null) return 1;
-  return new Prisma.Decimal(left.toString()).comparedTo(right.toString());
-}
-
-function compareDecimal(left: unknown, right: unknown): number {
-  if (left === null || left === undefined) return right === null || right === undefined ? 0 : -1;
-  if (right === null || right === undefined) return 1;
-  if (!isDecimalLike(left) || !isDecimalLike(right)) return 0;
-  return new Prisma.Decimal(left.toString()).comparedTo(right.toString());
-}
-
-function isDecimalLike(value: unknown): value is Prisma.Decimal | bigint | string | number {
-  return (
-    value instanceof Prisma.Decimal ||
-    typeof value === 'bigint' ||
-    typeof value === 'string' ||
-    typeof value === 'number'
-  );
-}
-
-function isZero(value: Exclude<RankValue, null>): boolean {
-  return new Prisma.Decimal(value.toString()).isZero();
-}
+export type FeaturedRow = {
+  pool_id: string;
+  token: string;
+  creator: string;
+  status: string;
+  name: string;
+  symbol: string;
+  daily_volume_eth: string;
+  total_volume_eth: string;
+};

@@ -25,7 +25,7 @@ const ENTRIES: Array<{ contract: EventContract; name: string; params: string }> 
     contract: 'hook',
     name: 'Launched',
     params:
-      'bytes32 indexed poolId, address indexed creator, address indexed token, uint256 totalSupply, int24 openingLevel, int24 farLevel, bytes32 configHash',
+      'bytes32 indexed poolId, address indexed creator, address indexed token, string name, string symbol, string uri, uint256 totalSupply, int24 openingLevel, int24 farLevel, bytes32 configHash',
   },
   {
     contract: 'hook',
@@ -68,7 +68,7 @@ const ENTRIES: Array<{ contract: EventContract; name: string; params: string }> 
     contract: 'hook',
     name: 'Graduated',
     params:
-      'bytes32 indexed poolId, int24 graduationLevel, uint256 quoteProceeds, uint256 lpSeedQuote, uint256 creatorQuote, uint256 protocolQuote, uint128 fullRangeLiquidity',
+      'bytes32 indexed poolId, int24 graduationLevel, uint256 quoteProceeds, uint256 lpSeedQuote, uint256 creatorQuote, uint256 protocolQuote, uint128 fullRangeLiquidity, uint128 wallLiquidity',
   },
   {
     contract: 'hook',
@@ -80,7 +80,7 @@ const ENTRIES: Array<{ contract: EventContract; name: string; params: string }> 
   {
     contract: 'hook',
     name: 'PayoutTipPaid',
-    params: 'bytes32 indexed poolId, address indexed flusher, uint256 amount',
+    params: 'bytes32 indexed poolId, address indexed recipient, uint256 amount',
   },
   {
     contract: 'hook',
@@ -153,6 +153,7 @@ const ENTRIES: Array<{ contract: EventContract; name: string; params: string }> 
       'uint64 indexed version, uint64 harvestServiceFeeWad, uint64 quoteCreatorShareWad, uint64 tokenMilestoneFundShareWad',
   },
   { contract: 'hook', name: 'ProtocolRecipientSet', params: 'address indexed recipient' },
+  { contract: 'hook', name: 'TrustedOperatorSet', params: 'address indexed operator' },
 
   // --- PayoutPluginRegistry (4) ---
   {
@@ -213,6 +214,11 @@ const ENTRIES: Array<{ contract: EventContract; name: string; params: string }> 
     params: 'uint64 previousDelay, uint64 newDelay',
   },
   { contract: 'controller', name: 'ProtocolTargetBound', params: 'address indexed target' },
+  {
+    contract: 'controller',
+    name: 'TrustedOperatorUpdated',
+    params: 'address indexed previousOperator, address indexed operator',
+  },
 
   // --- RevenueNFT (4; standard ERC-721 plus MinterSet) ---
   { contract: 'revenueNft', name: 'MinterSet', params: 'address indexed minter' },

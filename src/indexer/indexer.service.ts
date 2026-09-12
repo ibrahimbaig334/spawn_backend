@@ -1,11 +1,10 @@
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
-import type { PublicClient, Log } from 'viem';
+import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
 import { decodeEventLog, erc20Abi } from 'viem';
+import type { Log } from 'viem';
 import { Prisma, type PrismaService } from '../infrastructure/database/prisma.service';
 import { ChainClientFactory } from '../infrastructure/blockchain/chain-client.factory';
 import { BlockchainRegistryService } from '../infrastructure/blockchain/blockchain-registry.service';
 import { ProtocolReadService } from '../infrastructure/blockchain/protocol-read.service';
-import { topicsByContract } from '../infrastructure/blockchain/event-topics';
 import {
   PAYOUT_PLUGIN_REGISTRY_ABI,
   PROTOCOL_CONTROLLER_ABI,
@@ -14,21 +13,24 @@ import {
 import { BlockIngesterService, type IndexerConfig } from './block-ingester.service';
 import { ProjectionApplier, type ProjectorContext } from './projection-applier';
 import { MarketProjector } from './market-projector';
-import { decodeHookEvent, type DecodedHookEvent } from './event-decoder';
+import { decodeHookEvent, decodePoolManagerEvent, type DecodedHookEvent } from './event-decoder';
+import { rebuildAggregates } from './aggregate-rebuild';
+import { pluginRoleFromUint8, accrualSourceFromUint8 } from '../protocol/protocol-constants';
 
 /**
- * The indexer orchestrator: polls confirmed blocks, fetches filtered logs (hook,
- * PoolManager, tracked tokens, RevenueNFT, registry, controller), decodes, and
- * applies projections atomically per block. Reorgs roll back via the ingester.
+ * The indexer orchestrator: polls confirmed blocks, fetches filtered logs,
+ * decodes, and applies projections atomically per block. Reorgs roll back via
+ * the ingester's receipt ledger.
  */
 
 @Injectable()
-export class IndexerService implements OnModuleInit, OnModuleDestroy {
+export class IndexerService implements OnModuleDestroy {
   private readonly logger = new Logger(IndexerService.name);
   private timer?: ReturnType<typeof setInterval>;
   private running = false;
   private stopping = false;
   private config?: IndexerConfig;
+  private actionsByValue: Record<number, string> = {};
 
   constructor(
     private readonly prisma: PrismaService,
@@ -44,11 +46,6 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     this.config = config;
     this.ingester.configure(config);
     this.registry.configure(config.chainId, []);
-  }
-
-  async onModuleInit(): Promise<void> {
-    // The indexer entrypoint calls configure() explicitly; the module hook is a
-    // no-op so the same module can be imported by tests.
   }
 
   onModuleDestroy(): void {
@@ -77,7 +74,6 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     this.timer = undefined;
   }
 
-  /** One poll iteration: reconcile reorgs, ingest a batch of blocks. */
   async tick(): Promise<void> {
     if (this.running || this.stopping) return;
     this.running = true;
@@ -88,7 +84,10 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         });
       });
       if (rolledBack > 0) {
-        this.logger.warn(`rolled back ${rolledBack} blocks after reorg`);
+        this.logger.warn(`rolled back ${rolledBack} blocks after reorg; rebuilding aggregates`);
+        await this.prisma.$transaction(async (tx) => {
+          await rebuildAggregates(tx, this.config!.chainId);
+        });
       }
 
       const blocks = await this.ingester.fetchNextBlocks();
@@ -102,7 +101,6 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Ingests one block: fetch logs, decode, project, commit. */
   private async ingestBlock(block: {
     number: bigint;
     hash: string;
@@ -114,38 +112,40 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     const book = this.registry.book(chainId);
     const client = this.clientFactory.client(chainId);
 
-    const logs = await client.getLogs({
-      fromBlock: block.number,
-      toBlock: block.number,
-    });
+    const logs = await client.getLogs({ fromBlock: block.number, toBlock: block.number });
 
     await this.prisma.$transaction(
       async (tx) => {
         const version = await this.ingester.nextVersion(tx);
-        const ctx: ProjectorContext = {
+        const base: ProjectorContext = {
           chainId,
           blockNumber: block.number,
-          blockTime: block.timestamp,
           blockHash: block.hash,
+          blockTime: block.timestamp,
           version,
           txHash: '',
           logIndex: 0,
+          transactionIndex: 0,
           hookAddress: book.hook,
           poolManagerAddress: book.poolManager,
         };
 
-        // Pass 1: raw ledger + hook events (in log order).
+        // Pass 1: raw ledger + hook events, in log order.
         for (const log of logs) {
-          ctx.txHash = log.transactionHash ?? '';
-          ctx.logIndex = log.logIndex;
+          const ctx = {
+            ...base,
+            txHash: log.transactionHash ?? '',
+            logIndex: log.logIndex,
+            transactionIndex: log.transactionIndex ?? 0,
+          };
           await tx.rawChainEvent
             .create({
               data: {
                 chainId,
                 blockNumber: block.number,
                 logIndex: log.logIndex,
-                transactionIndex: log.transactionIndex ?? 0,
-                transactionHash: log.transactionHash ?? '',
+                transactionIndex: ctx.transactionIndex,
+                transactionHash: ctx.txHash,
                 address: log.address.toLowerCase(),
                 topic0: (log.topics[0] ?? '').toLowerCase(),
                 topics: log.topics.map((t) => t.toLowerCase()),
@@ -156,12 +156,10 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
               },
             })
             .catch((error) => {
-              // Duplicate logIndex (shouldn't happen on a canonical block); ignore.
               this.logger.warn(`rawChainEvent insert skipped: ${(error as Error).message}`);
             });
 
           if (log.address.toLowerCase() !== book.hook.toLowerCase()) continue;
-          if (!log.topics[0]) continue;
           const decoded = this.tryDecodeHookEvent(log);
           if (decoded) {
             await this.applier.applyHookEvent(tx, ctx, decoded);
@@ -180,37 +178,46 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
           }
         }
 
-        // Pass 2: PoolManager swaps for pools we know (after Launched processed).
+        // Pass 2: PoolManager swaps (facts + candles + aggregates).
         for (const log of logs) {
           if (log.address.toLowerCase() !== book.poolManager.toLowerCase()) continue;
-          ctx.txHash = log.transactionHash ?? '';
-          ctx.logIndex = log.logIndex;
-          await this.applyPoolManagerLog(tx, ctx, client, log);
-        }
-
-        // Pass 3: ERC-20 transfers on tracked tokens + RevenueNFT transfers.
-        for (const log of logs) {
-          ctx.txHash = log.transactionHash ?? '';
-          ctx.logIndex = log.logIndex;
-          const address = log.address.toLowerCase();
-          if (address === book.revenueNft.toLowerCase()) {
-            await this.applyRevenueNftLog(tx, ctx, log);
-          } else {
-            const tracked = await tx.tokenChainState.findUnique({
-              where: { chainId_contractAddress: { chainId, contractAddress: address } },
-              select: { tokenId: true },
-            });
-            if (tracked) {
-              await this.applyTokenTransferLog(tx, ctx, address, log);
-            }
+          const ctx = {
+            ...base,
+            txHash: log.transactionHash ?? '',
+            logIndex: log.logIndex,
+            transactionIndex: log.transactionIndex ?? 0,
+          };
+          const decoded = decodePoolManagerEvent(log);
+          if (decoded?.name === 'Swap') {
+            await this.market.applySwap(tx, ctx, decoded);
           }
         }
 
-        // Pass 4: registry + controller governance events.
+        // Pass 3: launch-token burns (ERC-20 Transfer to zero) + RevenueNFT transfers.
         for (const log of logs) {
           const address = log.address.toLowerCase();
-          ctx.txHash = log.transactionHash ?? '';
-          ctx.logIndex = log.logIndex;
+          const ctx = {
+            ...base,
+            txHash: log.transactionHash ?? '',
+            logIndex: log.logIndex,
+            transactionIndex: log.transactionIndex ?? 0,
+          };
+          if (address === book.revenueNft.toLowerCase()) {
+            await this.applyRevenueNftLog(tx, ctx, log);
+          } else {
+            await this.applyTokenTransferLog(tx, ctx, address, log);
+          }
+        }
+
+        // Pass 4: registry + controller.
+        for (const log of logs) {
+          const address = log.address.toLowerCase();
+          const ctx = {
+            ...base,
+            txHash: log.transactionHash ?? '',
+            logIndex: log.logIndex,
+            transactionIndex: log.transactionIndex ?? 0,
+          };
           if (address === book.payoutPluginRegistry.toLowerCase()) {
             await this.applyRegistryLog(tx, ctx, log);
           } else if (address === book.protocolController.toLowerCase()) {
@@ -218,106 +225,23 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
           }
         }
 
+        await tx.protocolState.upsert({
+          where: { chainId },
+          create: { chainId, lastIndexedBlock: block.number },
+          update: { lastIndexedBlock: block.number },
+        });
+
         await this.ingester.commitBlock(tx, block, version);
       },
       { timeout: 120_000, isolationLevel: 'Serializable' },
     );
 
-    this.logger.debug(`ingested block ${block.number} (${logs.length} logs, version applied)`);
+    this.logger.debug(`ingested block ${block.number} (${logs.length} logs)`);
   }
 
   private tryDecodeHookEvent(log: Log): DecodedHookEvent | null {
     try {
       return decodeHookEvent(log);
-    } catch {
-      return null;
-    }
-  }
-
-  private async applyPoolManagerLog(
-    tx: Parameters<Parameters<PrismaService['$transaction']>[0]>[0],
-    ctx: ProjectorContext,
-    client: PublicClient,
-    log: Log,
-  ): Promise<void> {
-    if (!log.topics[0]) return;
-    const swapTopic = topicsByContract('poolManager').find(() => true); // Swap only matters here
-    void swapTopic;
-    try {
-      const decoded = decodeEventLog({
-        abi: [
-          {
-            type: 'event',
-            name: 'Swap',
-            inputs: [
-              { type: 'bytes32', name: 'poolId', indexed: true },
-              { type: 'address', name: 'sender', indexed: true },
-              { type: 'int128', name: 'amount0', indexed: false },
-              { type: 'int128', name: 'amount1', indexed: false },
-              { type: 'uint160', name: 'sqrtPriceX96', indexed: false },
-              { type: 'uint128', name: 'liquidity', indexed: false },
-              { type: 'int24', name: 'tick', indexed: false },
-              { type: 'uint24', name: 'lpFee', indexed: false },
-            ],
-            anonymous: false,
-          },
-        ],
-        data: log.data,
-        topics: log.topics,
-      });
-      if (decoded.eventName !== 'Swap') return;
-      const args = decoded.args as unknown as {
-        poolId: `0x${string}`;
-        sender: string;
-        amount0: bigint;
-        amount1: bigint;
-        sqrtPriceX96: bigint;
-        liquidity: bigint;
-        tick: number;
-        lpFee: number;
-      };
-      const poolId = String(args.poolId).toLowerCase();
-
-      // Resolve the trader: the PoolManager Swap.sender is the router/executor; the
-      // actual trader is the transaction's sender (tx.from), which we resolve lazily.
-      const trader = await this.resolveTxSender(client, log.transactionHash);
-      await this.market.applySwap(
-        tx,
-        { ...ctx, traderWallet: trader },
-        {
-          name: 'Swap',
-          poolId,
-          sender: String(args.sender).toLowerCase(),
-          amount0: args.amount0,
-          amount1: args.amount1,
-          sqrtPriceX96: args.sqrtPriceX96,
-          liquidity: args.liquidity,
-          tick: args.tick,
-          lpFee: args.lpFee,
-        },
-      );
-    } catch {
-      // Not a Swap event or decode failed; the raw ledger already has it.
-    }
-  }
-
-  private txSenders = new Map<string, string>();
-
-  private async resolveTxSender(
-    client: PublicClient,
-    txHash: `0x${string}` | null | undefined,
-  ): Promise<string | null> {
-    if (!txHash) return null;
-    const cached = this.txSenders.get(txHash);
-    if (cached !== undefined) return cached;
-    try {
-      const tx = await client.getTransaction({ hash: txHash });
-      this.txSenders.set(txHash, tx.from.toLowerCase());
-      if (this.txSenders.size > 10_000) {
-        const first = this.txSenders.keys().next().value;
-        if (first) this.txSenders.delete(first);
-      }
-      return tx.from.toLowerCase();
     } catch {
       return null;
     }
@@ -331,7 +255,14 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     if (!log.topics[0]) return;
     try {
-      const decoded = decodeEventLog({ abi: erc20Abi, data: log.data, topics: log.topics });
+      const decoded = decodeEventLog({
+        abi: erc20Abi,
+        data: log.data,
+        topics: log.topics,
+      }) as unknown as {
+        eventName: string;
+        args: Record<string, unknown>;
+      };
       if (decoded.eventName !== 'Transfer') return;
       const args = decoded.args as unknown as { from: string; to: string; value: bigint };
       await this.market.applyTokenTransfer(tx, ctx, {
@@ -341,7 +272,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         value: args.value,
       });
     } catch {
-      // ignore
+      // not a tracked token / not a Transfer; ignore
     }
   }
 
@@ -356,17 +287,17 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         abi: REVENUE_NFT_ABI,
         data: log.data,
         topics: log.topics,
-      }) as unknown as { eventName: string; args: Record<string, unknown> };
+      }) as unknown as {
+        eventName: string;
+        args: Record<string, unknown>;
+      };
       if (decoded.eventName !== 'Transfer') return;
       const args = decoded.args as unknown as { from: string; to: string; tokenId: bigint };
-      // RevenueNFT.tokenIdOf(poolId) is a pure deterministic mapping (uint256(poolId)).
-      const poolId = tokenIdToPoolId(args.tokenId);
-      await this.market.applyRevenueNftTransfer(
-        tx,
-        ctx,
-        { tokenId: args.tokenId, from: args.from.toLowerCase(), to: args.to.toLowerCase() },
-        () => poolId,
-      );
+      await this.market.applyRevenueNftTransfer(tx, ctx, {
+        tokenId: args.tokenId,
+        from: args.from.toLowerCase(),
+        to: args.to.toLowerCase(),
+      });
     } catch {
       // ignore
     }
@@ -383,34 +314,73 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         abi: PAYOUT_PLUGIN_REGISTRY_ABI,
         data: log.data,
         topics: log.topics,
-      }) as unknown as { eventName: string; args: Record<string, unknown> };
+      }) as unknown as {
+        eventName: string;
+        args: Record<string, unknown>;
+      };
       const args = decoded.args;
       switch (decoded.eventName) {
         case 'PluginRegistered': {
           const index = Number(args.index);
+          const role = pluginRoleFromUint8(Number(args.role)) ?? 'INVALID';
           await tx.pluginRegistryEntry.upsert({
-            where: { chainId_index: { chainId: ctx.chainId, index } },
+            where: { chainId_registryIndex: { chainId: ctx.chainId, registryIndex: index } },
             create: {
               chainId: ctx.chainId,
-              index,
+              registryIndex: index,
               plugin: String(args.plugin).toLowerCase(),
-              takeWad: wadToDecimal(BigInt((args.takeWad as bigint) ?? 0n)),
+              takeWad: wadDecimal(BigInt((args.takeWad as bigint) ?? 0n)),
               gasLimit: Number(args.gasLimit ?? 0),
               codeHash: typeof args.codeHash === 'string' ? args.codeHash.toLowerCase() : '',
-              role: Number(args.role ?? 0),
-              registeredAtBlock: ctx.blockNumber,
-              blockTime: ctx.blockTime,
+              role,
+              registeredBlock: ctx.blockNumber,
             },
-            update: {},
+            update: {
+              plugin: String(args.plugin).toLowerCase(),
+              takeWad: wadDecimal(BigInt((args.takeWad as bigint) ?? 0n)),
+              gasLimit: Number(args.gasLimit ?? 0),
+              codeHash: typeof args.codeHash === 'string' ? args.codeHash.toLowerCase() : '',
+              role,
+              registeredBlock: ctx.blockNumber,
+            },
           });
           break;
         }
         case 'PluginSuspensionSet': {
-          const index = Number(args.index);
-          const suspended = Boolean(args.suspended);
           await tx.pluginRegistryEntry.updateMany({
-            where: { chainId: ctx.chainId, index },
-            data: { suspended },
+            where: { chainId: ctx.chainId, registryIndex: Number(args.index) },
+            data: { suspended: Boolean(args.suspended) },
+          });
+          break;
+        }
+        case 'AdministratorProposed': {
+          await tx.protocolState.upsert({
+            where: { chainId: ctx.chainId },
+            create: {
+              chainId: ctx.chainId,
+              pendingAdministrator: String(args.pendingAdministrator).toLowerCase(),
+              lastIndexedBlock: ctx.blockNumber,
+            },
+            update: {
+              pendingAdministrator: String(args.pendingAdministrator).toLowerCase(),
+              lastIndexedBlock: ctx.blockNumber,
+            },
+          });
+          break;
+        }
+        case 'AdministratorAccepted': {
+          await tx.protocolState.upsert({
+            where: { chainId: ctx.chainId },
+            create: {
+              chainId: ctx.chainId,
+              administrator: String(args.administrator).toLowerCase(),
+              lastIndexedBlock: ctx.blockNumber,
+            },
+            update: {
+              administrator: String(args.administrator).toLowerCase(),
+              pendingAdministrator: null,
+              lastIndexedBlock: ctx.blockNumber,
+            },
           });
           break;
         }
@@ -433,43 +403,140 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         abi: PROTOCOL_CONTROLLER_ABI,
         data: log.data,
         topics: log.topics,
-      }) as unknown as { eventName: string; args: Record<string, unknown> };
+      }) as unknown as {
+        eventName: string;
+        args: Record<string, unknown>;
+      };
       const args = decoded.args;
       switch (decoded.eventName) {
         case 'OperationScheduled': {
           const operationId = String(args.operationId).toLowerCase();
+          const action = this.actionName(Number(args.action));
           await tx.governanceOperation.upsert({
             where: { chainId_operationId: { chainId: ctx.chainId, operationId } },
             create: {
               chainId: ctx.chainId,
               operationId,
-              action: actionFromUint8(Number(args.action)),
+              action,
               payload: {},
               status: 'SCHEDULED',
-              readyAtBlock: null,
               readyAt: readyAtToDate(args.readyAt),
               blockTime: ctx.blockTime,
             },
             update: {
               status: 'SCHEDULED',
+              action,
               readyAt: readyAtToDate(args.readyAt),
+              blockTime: ctx.blockTime,
             },
           });
           break;
         }
         case 'OperationExecuted': {
-          const operationId = String(args.operationId).toLowerCase();
           await tx.governanceOperation.updateMany({
-            where: { chainId: ctx.chainId, operationId },
+            where: { chainId: ctx.chainId, operationId: String(args.operationId).toLowerCase() },
             data: { status: 'EXECUTED', executedAtBlock: ctx.blockNumber },
           });
           break;
         }
         case 'OperationCancelled': {
-          const operationId = String(args.operationId).toLowerCase();
           await tx.governanceOperation.updateMany({
-            where: { chainId: ctx.chainId, operationId },
+            where: { chainId: ctx.chainId, operationId: String(args.operationId).toLowerCase() },
             data: { status: 'CANCELLED', cancelledAtBlock: ctx.blockNumber },
+          });
+          break;
+        }
+        case 'EconomicConfigUpdated': {
+          await tx.protocolState.upsert({
+            where: { chainId: ctx.chainId },
+            create: {
+              chainId: ctx.chainId,
+              economicVersion: BigInt((args.version as bigint) ?? 1n),
+              lastIndexedBlock: ctx.blockNumber,
+            },
+            update: {
+              economicVersion: BigInt((args.version as bigint) ?? 1n),
+              lastIndexedBlock: ctx.blockNumber,
+            },
+          });
+          break;
+        }
+        case 'ProtocolRecipientUpdated': {
+          await tx.protocolState.upsert({
+            where: { chainId: ctx.chainId },
+            create: {
+              chainId: ctx.chainId,
+              protocolRecipient: String(args.recipient).toLowerCase(),
+              lastIndexedBlock: ctx.blockNumber,
+            },
+            update: {
+              protocolRecipient: String(args.recipient).toLowerCase(),
+              lastIndexedBlock: ctx.blockNumber,
+            },
+          });
+          break;
+        }
+        case 'TrustedOperatorUpdated': {
+          const operator = String(args.operator).toLowerCase();
+          await tx.protocolState.upsert({
+            where: { chainId: ctx.chainId },
+            create: {
+              chainId: ctx.chainId,
+              trustedOperator: operator,
+              trustedOperatorBlock: ctx.blockNumber,
+              lastIndexedBlock: ctx.blockNumber,
+            },
+            update: {
+              trustedOperator: operator,
+              trustedOperatorBlock: ctx.blockNumber,
+              lastIndexedBlock: ctx.blockNumber,
+            },
+          });
+          break;
+        }
+        case 'GovernanceDelayUpdated': {
+          await tx.protocolState.upsert({
+            where: { chainId: ctx.chainId },
+            create: {
+              chainId: ctx.chainId,
+              governanceDelaySeconds: BigInt((args.newDelay as bigint) ?? 0n),
+              lastIndexedBlock: ctx.blockNumber,
+            },
+            update: {
+              governanceDelaySeconds: BigInt((args.newDelay as bigint) ?? 0n),
+              lastIndexedBlock: ctx.blockNumber,
+            },
+          });
+          break;
+        }
+        case 'AdministratorProposed': {
+          await tx.protocolState.upsert({
+            where: { chainId: ctx.chainId },
+            create: {
+              chainId: ctx.chainId,
+              pendingAdministrator: String(args.pendingAdministrator).toLowerCase(),
+              lastIndexedBlock: ctx.blockNumber,
+            },
+            update: {
+              pendingAdministrator: String(args.pendingAdministrator).toLowerCase(),
+              lastIndexedBlock: ctx.blockNumber,
+            },
+          });
+          break;
+        }
+        case 'AdministratorAccepted': {
+          await tx.protocolState.upsert({
+            where: { chainId: ctx.chainId },
+            create: {
+              chainId: ctx.chainId,
+              administrator: String(args.administrator).toLowerCase(),
+              lastIndexedBlock: ctx.blockNumber,
+            },
+            update: {
+              administrator: String(args.administrator).toLowerCase(),
+              pendingAdministrator: null,
+              lastIndexedBlock: ctx.blockNumber,
+            },
           });
           break;
         }
@@ -481,94 +548,136 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private actionName(
+    value: number,
+  ):
+    | 'SET_ECONOMIC_CONFIG'
+    | 'SET_PROTOCOL_RECIPIENT'
+    | 'REGISTER_PLUGIN'
+    | 'SET_PLUGIN_SUSPENDED'
+    | 'SET_GOVERNANCE_DELAY'
+    | 'SET_TRUSTED_OPERATOR' {
+    return (this.actionsByValue[value] ?? 'SET_ECONOMIC_CONFIG') as never;
+  }
+
   /**
-   * Boot backfill: read live protocol state once (template, economics, registry,
-   * protocol recipient) and seed the projection tables that events alone cannot
-   * reconstruct (they predate the indexer's start block).
+   * Boot backfill: live protocol state the event stream can't reconstruct from a
+   * mid-chain start point (economics, registry, governance, trusted operator).
    */
   private async bootBackfill(): Promise<void> {
     const chainId = this.config!.chainId;
     try {
-      const [template, economics, entryCount] = await Promise.all([
+      const [template, economics, entryCount, controller] = await Promise.all([
         this.protocolReads.template(chainId),
         this.protocolReads.economicConfig(chainId),
         this.protocolReads.registryEntryCount(chainId),
+        this.protocolReads.controllerState(chainId),
       ]);
-      void template;
 
-      await this.prisma.economicConfigRecord.upsert({
-        where: { chainId },
+      // Discover the ACTION_* constants so OperationScheduled action bytes decode
+      // to names for the published contract (no guessing).
+      this.actionsByValue = controller.actions;
+
+      await this.prisma.economicConfig.upsert({
+        where: { chainId_version: { chainId, version: economics.version } },
         create: {
           chainId,
           version: economics.version,
-          harvestServiceFeeWad: wadToDecimal(economics.harvestServiceFeeWad),
-          quoteCreatorShareWad: wadToDecimal(economics.quoteCreatorShareWad),
-          tokenMilestoneFundShareWad: wadToDecimal(economics.tokenMilestoneFundShareWad),
-          activatedAtBlock: 0n,
-          blockTime: new Date(),
+          harvestServiceFeeWad: wadDecimal(economics.harvestServiceFeeWad),
+          quoteCreatorShareWad: wadDecimal(economics.quoteCreatorShareWad),
+          tokenMilestoneFundShareWad: wadDecimal(economics.tokenMilestoneFundShareWad),
+          effectiveBlock: 0n,
+          effectiveAt: new Date(),
         },
         update: {
-          version: economics.version,
-          harvestServiceFeeWad: wadToDecimal(economics.harvestServiceFeeWad),
-          quoteCreatorShareWad: wadToDecimal(economics.quoteCreatorShareWad),
-          tokenMilestoneFundShareWad: wadToDecimal(economics.tokenMilestoneFundShareWad),
+          harvestServiceFeeWad: wadDecimal(economics.harvestServiceFeeWad),
+          quoteCreatorShareWad: wadDecimal(economics.quoteCreatorShareWad),
+          tokenMilestoneFundShareWad: wadDecimal(economics.tokenMilestoneFundShareWad),
+        },
+      });
+
+      await this.prisma.protocolState.upsert({
+        where: { chainId },
+        create: {
+          chainId,
+          economicVersion: economics.version,
+          protocolRecipient: controller.protocolRecipient ?? null,
+          trustedOperator: controller.trustedOperator ?? null,
+          administrator: controller.administrator ?? null,
+          pendingAdministrator: controller.pendingAdministrator ?? null,
+          governanceDelaySeconds: controller.governanceDelay ?? null,
+          lastIndexedBlock: 0n,
+        },
+        update: {
+          economicVersion: economics.version,
+          protocolRecipient: controller.protocolRecipient ?? null,
+          trustedOperator: controller.trustedOperator ?? null,
+          administrator: controller.administrator ?? null,
+          pendingAdministrator: controller.pendingAdministrator ?? null,
+          governanceDelaySeconds: controller.governanceDelay ?? null,
         },
       });
 
       for (let index = 0; index < entryCount; index += 1) {
         const entry = await this.protocolReads.registryEntry(chainId, index);
         await this.prisma.pluginRegistryEntry.upsert({
-          where: { chainId_index: { chainId, index } },
+          where: { chainId_registryIndex: { chainId, registryIndex: index } },
           create: {
             chainId,
-            index,
+            registryIndex: index,
             plugin: entry.plugin.toLowerCase(),
-            takeWad: wadToDecimal(entry.takeWad),
+            takeWad: wadDecimal(entry.takeWad),
             gasLimit: entry.gasLimit,
             codeHash: entry.codeHash.toLowerCase(),
-            role: entry.role,
+            role: pluginRoleFromUint8(entry.role) ?? 'INVALID',
             suspended: entry.suspended,
-            registeredAtBlock: 0n,
-            blockTime: new Date(),
+            registeredBlock: 0n,
           },
           update: {
             plugin: entry.plugin.toLowerCase(),
-            takeWad: wadToDecimal(entry.takeWad),
+            takeWad: wadDecimal(entry.takeWad),
             gasLimit: entry.gasLimit,
             codeHash: entry.codeHash.toLowerCase(),
-            role: entry.role,
+            role: pluginRoleFromUint8(entry.role) ?? 'INVALID',
             suspended: entry.suspended,
           },
         });
       }
+
+      this.assertTemplate(template);
       this.logger.log(
-        `boot backfill complete: economics v${economics.version}, ${entryCount} registry entries`,
+        `boot backfill complete: economics v${economics.version}, ${entryCount} registry entries, trustedOperator=${controller.trustedOperator ?? 'unset'}`,
       );
     } catch (error) {
       this.logger.warn(`boot backfill skipped: ${(error as Error).message}`);
     }
   }
-}
 
-function actionFromUint8(
-  value: number,
-):
-  | 'SET_ECONOMIC_CONFIG'
-  | 'SET_PROTOCOL_RECIPIENT'
-  | 'REGISTER_PLUGIN'
-  | 'SET_PLUGIN_SUSPENDED'
-  | 'SET_GOVERNANCE_DELAY' {
-  // ProtocolController.ACTION_* ordering: ECONOMIC_CONFIG, PROTOCOL_RECIPIENT,
-  // REGISTER_PLUGIN, PLUGIN_SUSPENDED, GOVERNANCE_DELAY (values read live where
-  // needed; the mapping is stable for the published contract).
-  const actions = [
-    'SET_ECONOMIC_CONFIG',
-    'SET_PROTOCOL_RECIPIENT',
-    'REGISTER_PLUGIN',
-    'SET_PLUGIN_SUSPENDED',
-    'SET_GOVERNANCE_DELAY',
-  ] as const;
-  return actions[value] ?? 'SET_ECONOMIC_CONFIG';
+  private assertTemplate(template: Awaited<ReturnType<ProtocolReadService['template']>>): void {
+    // The data-layer views assume the canonical template (pinned supply, 13862-level
+    // curve, 22-band decaying ladder). A deployment-generation change must be an
+    // explicit decision, not a silent drift.
+    const expected: Record<string, number | bigint> = {
+      curvePositions: 32,
+      curveSpanLevels: 13862,
+      bandLevelSpacing: 2235,
+      bandFirstStepLevels: 6932,
+      bandStepDecayLevels: 391,
+      bandWidthLevels: 447,
+      coreBandCount: 22,
+      maxFeeFundedBands: 30,
+      openingFdvWei: 2000000000000000000n,
+    };
+    for (const [key, value] of Object.entries(expected)) {
+      const actual = (template as unknown as Record<string, number | bigint>)[key];
+      if (actual !== undefined && BigInt(actual) !== BigInt(value)) {
+        throw new Error(
+          `template.${key} = ${actual} does not match the canonical deployment (${value}); update protocol constants and data layer together`,
+        );
+      }
+    }
+    void accrualSourceFromUint8;
+  }
 }
 
 function readyAtToDate(value: unknown): Date | null {
@@ -578,13 +687,6 @@ function readyAtToDate(value: unknown): Date | null {
   return new Date(seconds * 1000);
 }
 
-function tokenIdToPoolId(tokenId: bigint): string | null {
-  // RevenueNFT.tokenIdOf(poolId) = uint256(poolId): the bytes32 pool id zero-
-  // extended to uint256. Inverse: hex-encode the uint256 to 32 bytes.
-  const hex = tokenId.toString(16).padStart(64, '0');
-  return `0x${hex}`;
-}
-
-function wadToDecimal(value: bigint): Prisma.Decimal {
+function wadDecimal(value: bigint): Prisma.Decimal {
   return new Prisma.Decimal(value.toString()).div(new Prisma.Decimal(10).pow(18));
 }

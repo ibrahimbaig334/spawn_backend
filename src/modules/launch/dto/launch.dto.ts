@@ -73,7 +73,7 @@ export class PrepareLaunchDto {
   @Type(() => TokenSocialsDto)
   socials?: TokenSocialsDto;
 
-  @ApiProperty({ description: 'Total supply in token-wei (decimal string)' })
+  @ApiProperty({ description: 'Total supply in token-wei; pinned by protocol to 1,000,000,000e18' })
   @IsString()
   @Matches(/^\d+$/, { message: 'totalSupply must be a non-negative decimal string' })
   totalSupply!: string;
@@ -101,11 +101,6 @@ export class RelayLaunchDto {
   @IsString()
   @IsNotEmpty()
   launchId!: string;
-
-  @ApiProperty({ description: '65-byte EIP-712 signature over the LaunchConfig (hex)' })
-  @IsString()
-  @Matches(/^0x[0-9a-fA-F]{130}$/, { message: 'signature must be 65 bytes of hex' })
-  signature!: string;
 }
 
 export class LaunchStatusQueryDto {

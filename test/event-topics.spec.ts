@@ -13,14 +13,14 @@ describe('event topic registry', () => {
     );
   });
 
-  it('covers the full hook event catalog (26 events)', () => {
+  it('covers the full hook event catalog (27 events)', () => {
     const hookEvents = EVENT_TOPICS.filter((e) => e.contract === 'hook');
-    expect(hookEvents.length).toBe(26);
+    expect(hookEvents.length).toBe(27);
   });
 
   it('covers registry (4), controller (9), NFT (4), token (2), PoolManager (3)', () => {
     expect(EVENT_TOPICS.filter((e) => e.contract === 'registry').length).toBe(4);
-    expect(EVENT_TOPICS.filter((e) => e.contract === 'controller').length).toBe(9);
+    expect(EVENT_TOPICS.filter((e) => e.contract === 'controller').length).toBe(10);
     expect(EVENT_TOPICS.filter((e) => e.contract === 'revenueNft').length).toBe(4);
     expect(EVENT_TOPICS.filter((e) => e.contract === 'token').length).toBe(2);
     expect(EVENT_TOPICS.filter((e) => e.contract === 'poolManager').length).toBe(3);
@@ -30,7 +30,7 @@ describe('event topic registry', () => {
     const launched = topicByName('Launched');
     expect(launched?.contract).toBe('hook');
     expect(launched?.signature).toBe(
-      'Launched(bytes32,address,address,uint256,int24,int24,bytes32)',
+      'Launched(bytes32,address,address,string,string,string,uint256,int24,int24,bytes32)',
     );
   });
 

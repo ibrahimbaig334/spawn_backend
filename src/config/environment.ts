@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 const nodeEnvironments = ['development', 'test', 'production'] as const;
-const processRoles = ['api', 'worker', 'indexer', 'seed'] as const;
+const processRoles = ['api', 'worker', 'indexer', 'broadcaster', 'seed'] as const;
 
 const baseSchema = z.object({
   NODE_ENV: z.enum(nodeEnvironments).default('development'),
@@ -61,23 +61,16 @@ const baseSchema = z.object({
   INDEXER_POLL_MS: z.coerce.number().int().min(250).default(3000),
   INDEXER_MAX_REORG_DEPTH: z.coerce.number().int().min(1).max(10000).default(256),
 
-  // Oracle
-  ETH_USD_ORACLE_ADDRESS: z
-    .string()
-    .regex(/^0x[0-9a-fA-F]{40}$/)
-    .optional(),
-  ETH_USD_ORACLE_STALE_SECONDS: z.coerce.number().int().positive().default(3600),
-
-  // Relayer (optional: enables relayed launches via the backend)
-  RELAYER_ENABLED: z
-    .string()
-    .default('false')
-    .transform((value) => value === 'true' || value === '1'),
-  RELAYER_PRIVATE_KEY: z
+  // Trusted operator key for relayed launches (BACKEND_GUIDE §6.1). In production
+  // this lives in an HSM/Vault; the env var is the staging path. The address must
+  // match the on-chain `trustedOperator` (protocol_state.trusted_operator).
+  TRUSTED_OPERATOR_PRIVATE_KEY: z
     .string()
     .regex(/^0x[0-9a-fA-F]{64}$/)
     .optional(),
-  RELAYER_MAX_ETH_PER_LAUNCH: z.string().regex(/^\d+$/).default('5000000000000000000'),
+
+  // WS broadcaster (pg LISTEN → tick/bar streams)
+  BROADCASTER_WS_PORT: z.coerce.number().int().min(1).max(65535).default(3001),
 
   // Thirdweb (token metadata upload)
   THIRDWEB_SECRET_KEY: z.string().trim().min(1).optional(),
@@ -114,10 +107,6 @@ export function validateEnvironment(input: Record<string, unknown>): Environment
 
   if (values.NODE_ENV === 'production' && !values.RATE_LIMIT_HMAC_KEY) {
     throw new Error('Production requires RATE_LIMIT_HMAC_KEY');
-  }
-
-  if (values.RELAYER_ENABLED && !values.RELAYER_PRIVATE_KEY) {
-    throw new Error('RELAYER_ENABLED requires RELAYER_PRIVATE_KEY');
   }
 
   const indexerRequiresRpc = values.PROCESS_ROLE === 'indexer';

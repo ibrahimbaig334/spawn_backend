@@ -1,20 +1,25 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { MILESTONE_HOOK_ABI, PAYOUT_PLUGIN_REGISTRY_ABI, STATE_VIEW_ABI } from './contract-abis';
 import type { Address } from 'viem';
 import { BlockchainRegistryService } from './blockchain-registry.service';
 import { ChainClientFactory } from './chain-client.factory';
+import {
+  MILESTONE_HOOK_ABI,
+  PAYOUT_PLUGIN_REGISTRY_ABI,
+  PROTOCOL_CONTROLLER_ABI,
+  STATE_VIEW_ABI,
+} from './contract-abis';
 
 /**
  * Read helpers over the protocol contracts with caching: template, economics,
- * registry entries, pool state, slot0, claimables. All reads go through
- * client.readContract with the curated ABIs (explicit args, no proxy inference).
- * Cache TTLs are short so the indexer/API stay close to chain head.
+ * registry, pool state, slot0, claimables, governance state. Cache TTLs are short
+ * so the indexer/API stay close to chain head.
  */
 
 const TEMPLATE_TTL_MS = 5 * 60 * 1000;
 const ECONOMICS_TTL_MS = 30 * 1000;
 const POOL_STATE_TTL_MS = 5 * 1000;
 const SLOT0_TTL_MS = 2 * 1000;
+const CONTROLLER_TTL_MS = 30 * 1000;
 
 @Injectable()
 export class ProtocolReadService {
@@ -29,33 +34,59 @@ export class ProtocolReadService {
   >();
   private readonly poolStateCache = new Map<string, { value: PoolStateView; expiresAt: number }>();
   private readonly slot0Cache = new Map<string, { value: Slot0View; expiresAt: number }>();
+  private controllerCache?: { value: ControllerStateView; expiresAt: number };
 
   constructor(
     private readonly registry: BlockchainRegistryService,
     private readonly clientFactory: ChainClientFactory,
   ) {}
 
-  private read<A extends readonly unknown[], R>(
+  private hookRead<T>(
     chainId: number,
-    contract: 'hook' | 'registry',
     functionName: string,
-    args?: A,
-  ): Promise<R> {
+    args?: readonly unknown[],
+  ): Promise<T> {
     const book = this.registry.book(chainId);
-    const address = (contract === 'hook' ? book.hook : book.payoutPluginRegistry) as Address;
-    const abi = contract === 'hook' ? MILESTONE_HOOK_ABI : PAYOUT_PLUGIN_REGISTRY_ABI;
     return this.clientFactory.client(chainId).readContract({
-      address,
-      abi,
+      address: book.hook as Address,
+      abi: MILESTONE_HOOK_ABI,
       functionName,
       ...(args && args.length > 0 ? { args } : {}),
-    }) as Promise<R>;
+    }) as Promise<T>;
+  }
+
+  private registryRead<T>(
+    chainId: number,
+    functionName: string,
+    args?: readonly unknown[],
+  ): Promise<T> {
+    const book = this.registry.book(chainId);
+    return this.clientFactory.client(chainId).readContract({
+      address: book.payoutPluginRegistry as Address,
+      abi: PAYOUT_PLUGIN_REGISTRY_ABI,
+      functionName,
+      ...(args && args.length > 0 ? { args } : {}),
+    }) as Promise<T>;
+  }
+
+  private controllerRead<T>(
+    chainId: number,
+    functionName: string,
+    args?: readonly unknown[],
+  ): Promise<T> {
+    const book = this.registry.book(chainId);
+    return this.clientFactory.client(chainId).readContract({
+      address: book.protocolController as Address,
+      abi: PROTOCOL_CONTROLLER_ABI,
+      functionName,
+      ...(args && args.length > 0 ? { args } : {}),
+    }) as Promise<T>;
   }
 
   async template(chainId: number): Promise<ProtocolTemplateView> {
     const cached = this.templateCache.get(chainId);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
-    const value = await this.read<readonly [], ProtocolTemplateView>(chainId, 'hook', 'template');
+    const value = await this.hookRead<ProtocolTemplateView>(chainId, 'template');
     this.templateCache.set(chainId, { value, expiresAt: Date.now() + TEMPLATE_TTL_MS });
     return value;
   }
@@ -63,11 +94,7 @@ export class ProtocolReadService {
   async economicConfig(chainId: number): Promise<EconomicConfigView> {
     const cached = this.economicsCache.get(chainId);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
-    const value = await this.read<readonly [], EconomicConfigView>(
-      chainId,
-      'hook',
-      'economicConfig',
-    );
+    const value = await this.hookRead<EconomicConfigView>(chainId, 'economicConfig');
     this.economicsCache.set(chainId, { value, expiresAt: Date.now() + ECONOMICS_TTL_MS });
     return value;
   }
@@ -76,12 +103,7 @@ export class ProtocolReadService {
     const key = `${chainId}:${poolId}`;
     const cached = this.poolStateCache.get(key);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
-    const value = await this.read<readonly [`0x${string}`], PoolStateView>(
-      chainId,
-      'hook',
-      'poolState',
-      [poolId as `0x${string}`],
-    );
+    const value = await this.hookRead<PoolStateView>(chainId, 'poolState', [poolId]);
     this.poolStateCache.set(key, { value, expiresAt: Date.now() + POOL_STATE_TTL_MS });
     return value;
   }
@@ -103,36 +125,91 @@ export class ProtocolReadService {
   }
 
   async registryEntry(chainId: number, index: number): Promise<PluginEntryView> {
-    return await this.read(chainId, 'registry', 'entry', [index]);
+    return await this.registryRead<PluginEntryView>(chainId, 'entry', [index]);
   }
 
   async registryEntryCount(chainId: number): Promise<number> {
-    const value = await this.read(chainId, 'registry', 'entryCount');
+    const value = await this.registryRead<bigint>(chainId, 'entryCount');
     return Number(value);
   }
 
+  /** Governance state + the live ACTION_* constants (so event action bytes decode to names). */
+  async controllerState(chainId: number): Promise<ControllerStateView> {
+    if (this.controllerCache && this.controllerCache.expiresAt > Date.now())
+      return this.controllerCache.value;
+    const [
+      administrator,
+      pendingAdministrator,
+      governanceDelay,
+      protocolRecipient,
+      trustedOperator,
+      e,
+      r,
+      p,
+      s,
+      g,
+    ] = await Promise.all([
+      this.controllerRead<string>(chainId, 'administrator'),
+      this.controllerRead<string>(chainId, 'pendingAdministrator'),
+      this.controllerRead<bigint>(chainId, 'governanceDelay'),
+      this.controllerRead<string>(chainId, 'protocolRecipient'),
+      this.hookRead<string>(chainId, 'trustedOperator'),
+      this.controllerRead<bigint>(chainId, 'ACTION_SET_ECONOMIC_CONFIG'),
+      this.controllerRead<bigint>(chainId, 'ACTION_SET_PROTOCOL_RECIPIENT'),
+      this.controllerRead<bigint>(chainId, 'ACTION_REGISTER_PLUGIN'),
+      this.controllerRead<bigint>(chainId, 'ACTION_SET_PLUGIN_SUSPENDED'),
+      this.controllerRead<bigint>(chainId, 'ACTION_SET_DELAY'),
+    ]);
+    const setOp = await this.controllerRead<bigint>(chainId, 'ACTION_SET_TRUSTED_OPERATOR');
+    const value: ControllerStateView = {
+      administrator: administrator.toLowerCase(),
+      pendingAdministrator: pendingAdministrator.toLowerCase(),
+      governanceDelay,
+      protocolRecipient: protocolRecipient.toLowerCase(),
+      trustedOperator: trustedOperator.toLowerCase(),
+      actions: {
+        [Number(e)]: 'SET_ECONOMIC_CONFIG',
+        [Number(r)]: 'SET_PROTOCOL_RECIPIENT',
+        [Number(p)]: 'REGISTER_PLUGIN',
+        [Number(s)]: 'SET_PLUGIN_SUSPENDED',
+        [Number(g)]: 'SET_GOVERNANCE_DELAY',
+        [Number(setOp)]: 'SET_TRUSTED_OPERATOR',
+      },
+    };
+    this.controllerCache = { value, expiresAt: Date.now() + CONTROLLER_TTL_MS };
+    return value;
+  }
+
   async creatorClaimable(chainId: number, poolId: string): Promise<bigint> {
-    return await this.read(chainId, 'hook', 'creatorClaimable', [poolId as `0x${string}`]);
+    return await this.hookRead<bigint>(chainId, 'creatorClaimable', [poolId]);
   }
 
   async creatorPathClaimable(chainId: number, poolId: string): Promise<bigint> {
-    return await this.read(chainId, 'hook', 'creatorPathClaimable', [poolId as `0x${string}`]);
+    return await this.hookRead<bigint>(chainId, 'creatorPathClaimable', [poolId]);
   }
 
   async protocolClaimable(chainId: number): Promise<bigint> {
-    return await this.read(chainId, 'hook', 'protocolClaimable');
+    return await this.hookRead<bigint>(chainId, 'protocolClaimable');
+  }
+
+  async protocolClaimBacked(chainId: number): Promise<bigint> {
+    return await this.hookRead<bigint>(chainId, 'protocolClaimBacked');
   }
 
   async payoutPot(chainId: number, poolId: string): Promise<bigint> {
-    return await this.read(chainId, 'hook', 'payoutPot', [poolId as `0x${string}`]);
+    return await this.hookRead<bigint>(chainId, 'payoutPot', [poolId]);
   }
 
   async pluginCarry(chainId: number, poolId: string, pluginIndex: number): Promise<bigint> {
-    return await this.read(chainId, 'hook', 'pluginCarry', [poolId as `0x${string}`, pluginIndex]);
+    return await this.hookRead<bigint>(chainId, 'pluginCarry', [poolId, pluginIndex]);
   }
 
   async carryBitmap(chainId: number, poolId: string): Promise<bigint> {
-    return await this.read(chainId, 'hook', 'carryBitmap', [poolId as `0x${string}`]);
+    return await this.hookRead<bigint>(chainId, 'carryBitmap', [poolId]);
+  }
+
+  async flushGasCeiling(chainId: number, poolId: string): Promise<bigint> {
+    return await this.hookRead<bigint>(chainId, 'flushGasCeiling', [poolId]);
   }
 
   async flushSignal(chainId: number, poolId: string): Promise<boolean> {
@@ -152,6 +229,10 @@ export class ProtocolReadService {
   invalidateEconomics(chainId: number): void {
     this.economicsCache.delete(chainId);
   }
+
+  invalidateGovernance(): void {
+    this.controllerCache = undefined;
+  }
 }
 
 export type ProtocolTemplateView = {
@@ -159,6 +240,8 @@ export type ProtocolTemplateView = {
   curvePositions: number;
   curveSpanLevels: number;
   bandLevelSpacing: number;
+  bandFirstStepLevels: number;
+  bandStepDecayLevels: number;
   bandWidthLevels: number;
   coreBandCount: number;
   maxFeeFundedBands: number;
@@ -204,6 +287,9 @@ export type PoolStateView = {
   fullRangeLiquidity: bigint;
   fullRangeTickLower: number;
   fullRangeTickUpper: number;
+  wallLiquidity: bigint;
+  wallTickLower: number;
+  wallTickUpper: number;
 };
 
 export type Slot0View = {
@@ -220,4 +306,13 @@ export type PluginEntryView = {
   codeHash: string;
   role: number;
   suspended: boolean;
+};
+
+export type ControllerStateView = {
+  administrator: string;
+  pendingAdministrator: string;
+  governanceDelay: bigint;
+  protocolRecipient: string;
+  trustedOperator: string;
+  actions: Record<number, string>;
 };

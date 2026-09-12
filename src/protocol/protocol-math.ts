@@ -1,3 +1,7 @@
+/**
+ * Protocol orientation, price math, launch signature, and curve/ladder geometry.
+ */
+
 import { keccak256, encodeAbiParameters, toHex, concatHex, type Address, type Hex } from 'viem';
 import {
   MIN_LEVEL,
@@ -231,17 +235,33 @@ export function curvePositionLiquidity(
 // Ladder geometry (LadderLib port)
 // ---------------------------------------------------------------------------
 
-/** Band i's level bounds (LadderLib.bandLevels); exists=false past tick space. */
+/**
+ * Band i's level bounds — decaying ladder schedule (LadderLib.bandLevels closed form).
+ * Band i+1 starts max(levelSpacing, firstStep - decay*i) levels above band i.
+ */
 export function bandLevels(
   graduationLevel: number,
+  firstStepLevels: number,
+  stepDecayLevels: number,
   levelSpacing: number,
   widthLevels: number,
   index: number,
 ): { levelLower: number; levelUpper: number; exists: boolean } {
-  const lower = graduationLevel + (index + 1) * levelSpacing;
-  const upper = lower + widthLevels;
-  if (upper > MAX_LEVEL) return { levelLower: 0, levelUpper: 0, exists: false };
-  return { levelLower: lower, levelUpper: upper, exists: true };
+  const m = BigInt(index) + 1n;
+  const first = BigInt(firstStepLevels);
+  const decay = BigInt(stepDecayLevels);
+  const spacing = BigInt(levelSpacing);
+  const k = (first - spacing) / decay;
+  let offset: bigint;
+  if (m <= k + 1n) {
+    offset = first * m - (decay * m * (m - 1n)) / 2n;
+  } else {
+    offset = first * (k + 1n) - (decay * k * (k + 1n)) / 2n + (m - k - 1n) * spacing;
+  }
+  const lower = BigInt(graduationLevel) + offset;
+  const upper = lower + BigInt(widthLevels);
+  if (upper > BigInt(MAX_LEVEL)) return { levelLower: 0, levelUpper: 0, exists: false };
+  return { levelLower: Number(lower), levelUpper: Number(upper), exists: true };
 }
 
 /** Per-core-band inventory (LadderLib.perBandInventory). */
@@ -342,6 +362,7 @@ export type LaunchConfigInput = {
   creator: Address;
   name: string;
   symbol: string;
+  uri: string;
   totalSupply: bigint;
   devBuyShareWad: bigint;
   payoutPlan: bigint;
@@ -360,6 +381,7 @@ export function launchConfigHash(config: LaunchConfigInput): Hex {
         { type: 'address' },
         { type: 'bytes32' },
         { type: 'bytes32' },
+        { type: 'bytes32' },
         { type: 'uint256' },
         { type: 'uint64' },
         { type: 'uint256' },
@@ -368,6 +390,7 @@ export function launchConfigHash(config: LaunchConfigInput): Hex {
         config.creator,
         keccakUtf8(config.name),
         keccakUtf8(config.symbol),
+        keccakUtf8(config.uri),
         config.totalSupply,
         config.devBuyShareWad,
         config.payoutPlan,
@@ -409,6 +432,7 @@ export function launchDigest(
         { type: 'address' },
         { type: 'bytes32' },
         { type: 'bytes32' },
+        { type: 'bytes32' },
         { type: 'uint256' },
         { type: 'uint64' },
         { type: 'uint256' },
@@ -419,6 +443,7 @@ export function launchDigest(
         config.creator,
         keccakUtf8(config.name),
         keccakUtf8(config.symbol),
+        keccakUtf8(config.uri),
         config.totalSupply,
         config.devBuyShareWad,
         config.payoutPlan,

@@ -1,33 +1,41 @@
-import { Injectable, Inject, Logger } from '@nestjs/common';
-import { wadToDecimal } from '../../indexer/decimal-utils';
-import { DomainException } from '../../common/http/domain.exception';
-import { PrismaService } from '../../infrastructure/database/prisma.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import { ChainClientFactory } from '../../infrastructure/blockchain/chain-client.factory';
 import { BlockchainRegistryService } from '../../infrastructure/blockchain/blockchain-registry.service';
 import { ProtocolReadService } from '../../infrastructure/blockchain/protocol-read.service';
+import { PrismaService } from '../../infrastructure/database/prisma.service';
 import {
   TOKEN_METADATA_STORAGE,
   type TokenMetadata,
   type TokenMetadataStorage,
 } from '../tokens/storage/token-metadata-storage';
+import { DomainException } from '../../common/http/domain.exception';
 import {
+  devBuyQuote,
+  farLevel,
   launchConfigHash,
   launchDigest,
   launchTokenSalt,
   openingLevel,
-  farLevel,
-  devBuyQuote,
   type LaunchConfigInput,
 } from '../../protocol/protocol-math';
-import { MAX_DEV_BUY_SHARE_WAD } from '../../protocol/protocol-constants';
-import { ChainClientFactory } from '../../infrastructure/blockchain/chain-client.factory';
+import {
+  FIXED_TOTAL_SUPPLY,
+  MAX_DEV_BUY_SHARE_WAD,
+  PROTOCOL_TEMPLATE_DEFAULT,
+} from '../../protocol/protocol-constants';
 import { LAUNCH_SUPPORT_ABI } from '../../infrastructure/blockchain/contract-abis';
+import type { Address } from 'viem';
 import type { PrepareLaunchDto } from './dto/launch.dto';
 
 /**
- * Launch preparation: validates a configuration against protocol bounds and the
- * live registry, uploads metadata, predicts the CREATE2 token address, computes the
- * EIP-712 digest, and quotes the optional dev buy. Returns everything the creator
- * needs to sign (and nothing they don't).
+ * Launch preparation: validates the configuration against protocol bounds and the
+ * live registry, uploads metadata (whose gateway URL becomes the on-chain token
+ * `uri`), predicts the CREATE2 token address, computes the EIP-712 digest, and
+ * quotes the optional dev buy.
+ *
+ * Under the trusted-operator model the creator never signs: the backend operator
+ * key signs the config at relay time (see launch-relay.service).
  */
 
 @Injectable()
@@ -53,13 +61,18 @@ export class LaunchPrepareService {
     }
     const book = this.registry.book(chainId);
 
+    const creator = input.creatorWalletAddress.toLowerCase() as Address;
     const totalSupply = BigInt(input.totalSupply);
     const devBuyShareWad = parseWad(input.devBuyShareWad);
     const payoutPlan = BigInt(input.payoutPlan);
-    const creator = input.creatorWalletAddress.toLowerCase();
+    const fixedSupply = BigInt(FIXED_TOTAL_SUPPLY);
 
-    if (totalSupply <= 0n) {
-      throw new DomainException(400, 'INVALID_TOTAL_SUPPLY', 'totalSupply must be positive');
+    if (totalSupply !== fixedSupply) {
+      throw new DomainException(
+        400,
+        'SUPPLY_NOT_FIXED',
+        `totalSupply is pinned by the protocol to ${fixedSupply.toString()} (1,000,000,000 tokens); any other value reverts`,
+      );
     }
     if (devBuyShareWad > BigInt(MAX_DEV_BUY_SHARE_WAD)) {
       throw new DomainException(
@@ -69,14 +82,28 @@ export class LaunchPrepareService {
       );
     }
 
-    // Registry-aware plan validation (bit count, takes sum, selectable entries).
     await this.validatePayoutPlan(chainId, payoutPlan);
 
-    // Opening/far geometry + dev-buy quote (pure math, exact).
+    // Metadata upload first: the resulting gateway URL is the on-chain token uri.
+    let metadata: { ipfsUri: string; gatewayUrl: string };
+    try {
+      const upload: TokenMetadata = {
+        name: input.name,
+        symbol: input.symbol,
+        description: input.description,
+        image: input.imageUri,
+        socials: input.socials,
+      };
+      metadata = await this.metadataStorage.upload(upload);
+    } catch (error) {
+      throw new DomainException(503, 'METADATA_UPLOAD_FAILED', (error as Error).message);
+    }
+    const uri = metadata.gatewayUrl;
+
     const template = await this.protocolReads.template(chainId);
     const opening = safeOpeningLevel(totalSupply, template.openingFdvWei);
     const far = safeFarLevel(opening, template.curveSpanLevels);
-    const curveSupply = (totalSupply * template.curveSupplyShareWad) / 10n ** 18n;
+    const curveSupply = mulDivWad(totalSupply, template.curveSupplyShareWad);
     const devBuy =
       devBuyShareWad > 0n
         ? devBuyQuote({
@@ -91,38 +118,24 @@ export class LaunchPrepareService {
         : null;
 
     const config: LaunchConfigInput = {
-      creator: creator as `0x${string}`,
+      creator,
       name: input.name,
       symbol: input.symbol,
+      uri,
       totalSupply,
       devBuyShareWad,
       payoutPlan,
       deadline: BigInt(input.deadline),
     };
     const configHash = launchConfigHash(config);
-    const digest = launchDigest(config, book.hook as `0x${string}`, chainId);
-
-    // Predict the token address on-chain (CREATE2 salt = keccak256(configHash, creator)).
+    const digest = launchDigest(config, book.hook as Address, chainId);
     const predictedToken = await this.predictToken(chainId, book, config);
+    void launchTokenSalt; // salt = keccak(configHash, creator); used by predictToken views
 
-    // Upload metadata (best-effort name/symbol/description/image/socials bundle).
-    let metadata: { ipfsUri: string; gatewayUrl: string } | null = null;
-    try {
-      const upload: TokenMetadata = {
-        name: input.name,
-        symbol: input.symbol,
-        description: input.description,
-        image: input.imageUri,
-        socials: input.socials,
-      };
-      metadata = await this.metadataStorage.upload(upload);
-    } catch (error) {
-      this.logger.warn(`metadata upload failed for ${configHash}: ${(error as Error).message}`);
-    }
-
-    // Persist the launch record (idempotent per config: same config+creator = same row).
     const existing = await this.prisma.launchRecord.findUnique({
-      where: { chainId_configHash_creatorWallet: { chainId, configHash, creatorWallet: creator } },
+      where: {
+        chainId_configHash_creatorWallet: { chainId, configHash, creatorWallet: creator },
+      },
     });
     const record = existing
       ? await this.prisma.launchRecord.update({
@@ -130,13 +143,16 @@ export class LaunchPrepareService {
           data: {
             name: input.name,
             symbol: input.symbol,
-            totalSupply: totalSupply.toString(),
-            devBuyShareWad: wadToDecimal(devBuyShareWad),
-            payoutPlan: payoutPlan.toString(),
+            uri,
+            description: input.description,
+            imageUri: input.imageUri,
+            ipfsUri: metadata.ipfsUri,
+            gatewayUrl: metadata.gatewayUrl,
+            socials: (input.socials ?? Prisma.JsonNull) as never,
             deadline: BigInt(input.deadline),
             digest,
             predictedToken,
-            state: 'PENDING_SIGNATURE',
+            state: existing.state === 'PENDING_RELAY' ? 'PENDING_RELAY' : existing.state,
           },
         })
       : await this.prisma.launchRecord.create({
@@ -145,21 +161,22 @@ export class LaunchPrepareService {
             creatorWallet: creator,
             name: input.name,
             symbol: input.symbol,
+            uri,
+            description: input.description,
+            imageUri: input.imageUri,
+            ipfsUri: metadata.ipfsUri,
+            gatewayUrl: metadata.gatewayUrl,
+            socials: (input.socials ?? undefined) as never,
             totalSupply: totalSupply.toString(),
-            devBuyShareWad: wadToDecimal(devBuyShareWad),
+            devBuyShareWad: wadDecimal(devBuyShareWad),
             payoutPlan: payoutPlan.toString(),
             deadline: BigInt(input.deadline),
             configHash,
             predictedToken,
-            signature: null,
             digest,
-            mode: 'RELAYED',
-            state: 'PENDING_SIGNATURE',
+            state: 'PENDING_RELAY',
           },
         });
-
-    // Link any offchain token row created earlier for this config (e.g. via a
-    // pre-launch "reserve" flow) — none exists at prepare time in v1.
 
     return {
       launchId: record.id,
@@ -168,19 +185,15 @@ export class LaunchPrepareService {
         creator,
         name: input.name,
         symbol: input.symbol,
-        totalSupply: input.totalSupply,
+        uri,
+        totalSupply: totalSupply.toString(),
         devBuyShareWad: input.devBuyShareWad,
         payoutPlan: input.payoutPlan,
         deadline: input.deadline,
       },
       configHash,
       digest,
-      domain: {
-        name: 'SpawnLaunchpad',
-        version: '1',
-        chainId,
-        verifyingContract: book.hook,
-      },
+      domain: { name: 'SpawnLaunchpad', version: '1', chainId, verifyingContract: book.hook },
       predictedToken,
       openingLevel: opening,
       farLevel: far,
@@ -193,12 +206,15 @@ export class LaunchPrepareService {
           }
         : null,
       metadata,
+      signatureNote:
+        'The backend trusted operator signs this configuration at relay time; the creator never signs. Direct creator launches (with dev buy) can be sent by the creator wallet calling launch(config, "0x") with value attached.',
       signaturePayload: {
         types: {
           LaunchConfig: [
             { name: 'creator', type: 'address' },
             { name: 'name', type: 'string' },
             { name: 'symbol', type: 'string' },
+            { name: 'uri', type: 'string' },
             { name: 'totalSupply', type: 'uint256' },
             { name: 'devBuyShareWad', type: 'uint64' },
             { name: 'payoutPlan', type: 'uint256' },
@@ -206,17 +222,13 @@ export class LaunchPrepareService {
           ],
         },
         primaryType: 'LaunchConfig',
-        domain: {
-          name: 'SpawnLaunchpad',
-          version: '1',
-          chainId,
-          verifyingContract: book.hook,
-        },
+        domain: { name: 'SpawnLaunchpad', version: '1', chainId, verifyingContract: book.hook },
         message: {
           creator,
           name: input.name,
           symbol: input.symbol,
-          totalSupply: input.totalSupply,
+          uri,
+          totalSupply: totalSupply.toString(),
           devBuyShareWad: input.devBuyShareWad,
           payoutPlan: input.payoutPlan,
           deadline: input.deadline,
@@ -249,7 +261,7 @@ export class LaunchPrepareService {
         );
       }
       if (entry.role !== 1) {
-        // PluginRole.PAYOUT = 1 (INVALID=0, PAYOUT=1, CREATOR_SYSTEM=2, UTILITY=3)
+        // PluginRole.PAYOUT = 1
         throw new DomainException(
           400,
           'PAYOUT_PLAN_ENTRY_NOT_SELECTABLE',
@@ -273,10 +285,8 @@ export class LaunchPrepareService {
     config: LaunchConfigInput,
   ): Promise<string> {
     const client = this.clientFactory.client(chainId);
-    const salt = launchTokenSalt(launchConfigHash(config), config.creator);
-    void salt;
     const address = await client.readContract({
-      address: book.launchSupport as `0x${string}`,
+      address: book.launchSupport as Address,
       abi: LAUNCH_SUPPORT_ABI,
       functionName: 'predictToken',
       args: [
@@ -284,6 +294,7 @@ export class LaunchPrepareService {
           creator: config.creator,
           name: config.name,
           symbol: config.symbol,
+          uri: config.uri,
           totalSupply: config.totalSupply,
           devBuyShareWad: config.devBuyShareWad,
           payoutPlan: config.payoutPlan,
@@ -297,10 +308,17 @@ export class LaunchPrepareService {
 }
 
 function parseWad(value: string): bigint {
-  // devBuyShareWad arrives as a decimal string (possibly fractional); scale to wei.
   const [whole, fraction = ''] = value.split('.');
   const fractionPadded = (fraction + '0'.repeat(18)).slice(0, 18);
   return BigInt(whole + fractionPadded);
+}
+
+function mulDivWad(a: bigint, wad: bigint): bigint {
+  return (a * wad) / 10n ** 18n;
+}
+
+function wadDecimal(value: bigint): Prisma.Decimal {
+  return new Prisma.Decimal(value.toString()).div(new Prisma.Decimal(10).pow(18));
 }
 
 function safeOpeningLevel(totalSupply: bigint, openingFdvWei: bigint): number {
@@ -327,6 +345,8 @@ function safeFarLevel(opening: number, spanLevels: number): number {
   }
 }
 
+void PROTOCOL_TEMPLATE_DEFAULT;
+
 export type PrepareLaunchResponse = {
   launchId: string;
   chainId: number;
@@ -334,6 +354,7 @@ export type PrepareLaunchResponse = {
     creator: string;
     name: string;
     symbol: string;
+    uri: string;
     totalSupply: string;
     devBuyShareWad: string;
     payoutPlan: string;
@@ -352,5 +373,6 @@ export type PrepareLaunchResponse = {
     endLevel: number;
   } | null;
   metadata: { ipfsUri: string; gatewayUrl: string } | null;
+  signatureNote: string;
   signaturePayload: Record<string, unknown>;
 };
