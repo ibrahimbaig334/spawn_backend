@@ -147,8 +147,14 @@ export class TokenQueryService {
       `SELECT * FROM pool_metrics WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ${query.limit} OFFSET ${query.skip}`,
     );
 
+    const images = await this.imageMap(
+      query.chainId,
+      pageRows.map((r) => String(r.token ?? '').toLowerCase()).filter(Boolean),
+    );
     const result: PageResult<unknown> = {
-      data: pageRows.map(cardFromMetrics),
+      data: pageRows.map((r) =>
+        cardFromMetrics(r, images.get(String(r.token ?? '').toLowerCase()) ?? null),
+      ),
       meta: pageMeta(query.page, query.limit, countRows[0]?.c ?? 0),
     };
     await this.cache.set(key, result, { ttlSeconds: CACHE_TTL_SECONDS.tokenList });
@@ -164,6 +170,19 @@ export class TokenQueryService {
     // Direct on-chain launches have no offchain token row: fall back to the
     // sink's on-chain token record so name/symbol/uri always resolve.
     const chainToken = pool.tokenRecord ?? (await this.sinkToken(pool.token));
+    // Logos live on the launch record for relayed/direct launches; surface
+    // them here (and backfill the provisioned token row) so cards and detail
+    // always render the creator's logo.
+    let imageUri = pool.tokenRecord?.imageUri ?? null;
+    if (!imageUri) {
+      const images = await this.imageMap(query.chainId, [pool.token.toLowerCase()]);
+      imageUri = images.get(pool.token.toLowerCase()) ?? null;
+      if (imageUri && pool.tokenRecord && !pool.tokenRecord.imageUri) {
+        await this.prisma.token
+          .update({ where: { id: pool.tokenRecord.id }, data: { imageUri } })
+          .catch(() => undefined);
+      }
+    }
     const stats = await this.prisma.poolStats.findUnique({
       where: { chainId_poolId: { chainId: query.chainId, poolId: pool.poolId } },
     });
@@ -192,7 +211,7 @@ export class TokenQueryService {
       name: pool.tokenRecord?.name ?? chainToken?.name ?? null,
       symbol: pool.tokenRecord?.symbol ?? chainToken?.symbol ?? null,
       description: pool.tokenRecord?.description ?? null,
-      imageUri: pool.tokenRecord?.imageUri ?? null,
+      imageUri,
       uri: pool.tokenRecord?.uri ?? chainToken?.uri ?? null,
       socials: pool.tokenRecord?.socials ?? null,
       launchTime: pool.launchTime,
@@ -445,6 +464,38 @@ export class TokenQueryService {
     return pool;
   }
 
+  /**
+   * Logo map for a page of pools: offchain/API token rows win, otherwise the
+   * latest launch record for the token address (relay/direct launches store
+   * the pinned logo there). One batched lookup per source per page.
+   */
+  private async imageMap(chainId: number, tokens: string[]): Promise<Map<string, string>> {
+    const map = new Map<string, string>();
+    if (tokens.length === 0) return map;
+    const list = tokens.map((t) => `'${t}'`).join(',');
+    const offchain = await this.prisma.$queryRawUnsafe<{ token: string; image: string }[]>(
+      `SELECT LOWER(token) AS token, "imageUri" AS image FROM backend.tokens
+       WHERE "chain_id" = ${chainId} AND LOWER(token) IN (${list}) AND "imageUri" IS NOT NULL`,
+    );
+    for (const row of offchain) {
+      if (row.image) map.set(row.token, row.image);
+    }
+    const missing = tokens.filter((t) => !map.has(t));
+    if (missing.length > 0) {
+      const missingList = missing.map((t) => `'${t}'`).join(',');
+      const records = await this.prisma.$queryRawUnsafe<{ token: string; image: string }[]>(
+        `SELECT LOWER("predictedToken") AS token, "imageUri" AS image FROM backend.launch_records
+         WHERE "chainId" = ${chainId} AND LOWER("predictedToken") IN (${missingList})
+           AND "imageUri" IS NOT NULL
+         ORDER BY "createdAt" DESC`,
+      );
+      for (const row of records) {
+        if (row.image && !map.has(row.token)) map.set(row.token, row.image);
+      }
+    }
+    return map;
+  }
+
   private async sinkToken(token: string): Promise<{ name: string; symbol: string; uri: string } | null> {
     const rows = await this.prisma.$queryRawUnsafe<{ name: string; symbol: string; uri: string }[]>(
       `SELECT name, symbol, uri FROM public.tokens WHERE token = '${token.toLowerCase()}'`,
@@ -462,7 +513,7 @@ export class TokenQueryService {
   }
 }
 
-function cardFromMetrics(r: Record<string, unknown>): Record<string, unknown> {
+function cardFromMetrics(r: Record<string, unknown>, imageUri: string | null = null): Record<string, unknown> {
   const lastSqrt = bigS(r.last_price_sqrt_x96);
   return {
     poolId: r.pool_id,
@@ -484,6 +535,7 @@ function cardFromMetrics(r: Record<string, unknown>): Record<string, unknown> {
     swapCount: s(r.swap_count),
     creatorRevenueTotal: s(r.creator_revenue_total),
     protocolRevenueTotal: s(r.protocol_revenue_total),
+    imageUri,
   };
 }
 
