@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../infrastructure/database/prisma.service';
 import { BlockchainRegistryService } from '../../infrastructure/blockchain/blockchain-registry.service';
 import { sqrtPriceAtLevel } from '../../protocol/protocol-math';
+import { resolveChainId } from '../../common/chain-id';
 
 /**
  * Keeper jobs (integration guide §7.3): the poll signals and incentives for
@@ -25,7 +26,7 @@ export class KeepersService {
   ) {}
 
   async jobs(query: { chainId?: number; kind?: string; limit?: number }) {
-    const chainId = query.chainId ?? Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
+    const chainId = resolveChainId(query.chainId);
     const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
     const book = this.registry.hasChain(chainId) ? this.registry.book(chainId) : null;
 

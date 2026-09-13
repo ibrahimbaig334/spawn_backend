@@ -15,7 +15,9 @@ import { APP_ENVIRONMENT } from './config/config.constants';
 async function bootstrap(): Promise<void> {
   const preliminaryEnvironment = validateEnvironment(process.env);
   const adapter = new FastifyAdapter({
-    bodyLimit: 256 * 1024,
+    // 8MB: logo uploads arrive as base64 JSON at POST /tokens/images (4.3MB
+    // file cap + ~33% base64 overhead); all other bodies stay tiny.
+    bodyLimit: 8 * 1024 * 1024,
     trustProxy: preliminaryEnvironment.trustedProxy,
   });
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, {

@@ -72,7 +72,12 @@ const baseSchema = z.object({
   // WS broadcaster (pg LISTEN → tick/bar streams)
   BROADCASTER_WS_PORT: z.coerce.number().int().min(1).max(65535).default(3001),
 
-  // Thirdweb (token metadata upload)
+  // Token metadata / image storage. Pinata pins server-side (JWT never
+  // reaches the browser); thirdweb is kept as a fallback driver.
+  METADATA_STORAGE_DRIVER: z.enum(['pinata', 'thirdweb']).default('pinata'),
+  PINATA_JWT: z.string().trim().min(1).optional(),
+  PINATA_GATEWAY: z.string().trim().url().default('https://gateway.pinata.cloud/ipfs'),
+  // Thirdweb storage (token metadata uploads; fallback driver only)
   THIRDWEB_SECRET_KEY: z.string().trim().min(1).optional(),
 
   // Rate limiting

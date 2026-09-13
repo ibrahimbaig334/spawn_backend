@@ -1,4 +1,4 @@
-import { sqrtPriceAtLevel } from '../../protocol/protocol-math';
+import { levelAtSqrtPrice } from '../../protocol/protocol-math';
 
 /**
  * ETH-per-token conversions on the raw Q64.96 sqrt axis (backend guide §1):
@@ -25,15 +25,9 @@ export function fdvEthWei(sqrtPriceX96: bigint, totalSupplyWei: bigint): bigint 
   return (totalSupplyWei << 192n) / (sqrtPriceX96 * sqrtPriceX96);
 }
 
-/** Level from a raw sqrt price: level = -tick(sqrt). */
+/** Level from a raw sqrt price: level = -tick(sqrt). Delegates to the exact
+ *  audited conversion (the binary search previously here assumed the wrong
+ *  table direction and pinned every pool at the ceiling). */
 export function levelFromSqrtPrice(sqrtPriceX96: bigint): number {
-  // Binary search over levels via the exact tick table.
-  let lo = -887_272;
-  let hi = 887_272;
-  while (lo < hi) {
-    const mid = lo + Math.ceil((hi - lo) / 2);
-    if (sqrtPriceAtLevel(mid) <= sqrtPriceX96) lo = mid;
-    else hi = mid - 1;
-  }
-  return lo;
+  return levelAtSqrtPrice(sqrtPriceX96);
 }

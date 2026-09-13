@@ -10,4 +10,5 @@ export const RATE_LIMIT_POLICIES = {
   comment: { ipLimit: 20, walletLimit: 10, windowSeconds: 60 },
   commentLike: { ipLimit: 120, walletLimit: 60, windowSeconds: 60 },
   profileUpdate: { ipLimit: 20, walletLimit: 10, windowSeconds: 3_600 },
+  rpcProxy: { ipLimit: 600, walletLimit: 600, windowSeconds: 60 },
 } as const satisfies Record<string, RateLimitPolicy>;

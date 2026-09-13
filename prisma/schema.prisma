@@ -5,13 +5,16 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  schemas  = ["backend"]
 }
+
 
 // ===========================================================================
 // Enums
 // ===========================================================================
 
 enum Timeframe {
+  @@schema("backend")
   H1
   H24
   D7
@@ -20,16 +23,19 @@ enum Timeframe {
 }
 
 enum PoolStatus {
+  @@schema("backend")
   bonding
   graduated
 }
 
 enum BandStatus {
+  @@schema("backend")
   live
   completed
 }
 
 enum PluginRole {
+  @@schema("backend")
   INVALID
   PAYOUT
   CREATOR_SYSTEM
@@ -37,24 +43,28 @@ enum PluginRole {
 }
 
 enum AccrualSource {
+  @@schema("backend")
   CURVE_PROCEEDS
   SWAP_FEES
   MILESTONE_HARVEST
 }
 
 enum PayoutOutcome {
+  @@schema("backend")
   delivered
   carried
   redirected
 }
 
 enum ClaimType {
+  @@schema("backend")
   creator
   creatorPath
   protocol
 }
 
 enum GovernanceAction {
+  @@schema("backend")
   SET_ECONOMIC_CONFIG
   SET_PROTOCOL_RECIPIENT
   REGISTER_PLUGIN
@@ -64,18 +74,21 @@ enum GovernanceAction {
 }
 
 enum GovernanceStatus {
+  @@schema("backend")
   SCHEDULED
   CANCELLED
   EXECUTED
 }
 
 enum IdempotencyState {
+  @@schema("backend")
   IN_PROGRESS
   COMPLETED
   FAILED
 }
 
 enum LaunchRecordState {
+  @@schema("backend")
   PENDING_RELAY
   SUBMITTED
   CONFIRMED
@@ -84,6 +97,7 @@ enum LaunchRecordState {
 }
 
 enum TokenSource {
+  @@schema("backend")
   API
   INDEXER
 }
@@ -103,6 +117,8 @@ model Profile {
   tokens         Token[]
   comments       Comment[]
   commentLikes   CommentLike[]
+
+  @@schema("backend")
 
   @@map("profiles")
 }
@@ -133,6 +149,7 @@ model Token {
   @@unique([chainId, token])
   @@index([claimedCreatorWallet, createdAt(sort: Desc)])
   @@index([createdAt(sort: Desc)])
+  @@schema("backend")
   @@map("tokens")
 }
 
@@ -170,6 +187,7 @@ model LaunchRecord {
   @@unique([tokenDbId])
   @@index([creatorWallet, state])
   @@index([state, createdAt])
+  @@schema("backend")
   @@map("launch_records")
 }
 
@@ -189,6 +207,7 @@ model IdempotencyRequest {
 
   @@unique([scope, walletAddress, key])
   @@index([expiresAt])
+  @@schema("backend")
   @@map("idempotency_requests")
 }
 
@@ -207,6 +226,7 @@ model OutboxEvent {
   createdAt      DateTime  @default(now()) @db.Timestamptz(6)
 
   @@index([publishedAt, availableAt])
+  @@schema("backend")
   @@map("outbox_events")
 }
 
@@ -214,6 +234,8 @@ model DomainGeneration {
   domain     String   @id @db.VarChar(128)
   generation BigInt   @default(0)
   updatedAt  DateTime @updatedAt @db.Timestamptz(6)
+
+  @@schema("backend")
 
   @@map("domain_generations")
 }
@@ -242,6 +264,7 @@ model Comment {
   @@index([tokenDbId, parentId, createdAt])
   @@index([tokenDbId, rootId, createdAt])
   @@index([tokenDbId, parentId, likeCount(sort: Desc), createdAt(sort: Desc)])
+  @@schema("backend")
   @@map("comments")
 }
 
@@ -253,6 +276,7 @@ model CommentLike {
   profile       Profile  @relation(fields: [walletAddress], references: [walletAddress])
 
   @@id([commentId, walletAddress])
+  @@schema("backend")
   @@map("comment_likes")
 }
 
@@ -266,6 +290,8 @@ model DeploymentManifest {
   syncedAt  DateTime @updatedAt @db.Timestamptz(6)
   createdAt DateTime @default(now()) @db.Timestamptz(6)
 
+  @@schema("backend")
+
   @@map("deployment_manifests")
 }
 
@@ -278,6 +304,8 @@ model ChainCursor {
   safeDepth     Int      @default(64)
   updatedAt     DateTime @updatedAt @db.Timestamptz(6)
 
+  @@schema("backend")
+
   @@map("chain_cursors")
 }
 
@@ -288,6 +316,8 @@ model ChainWatermark {
   blockHash        String   @db.VarChar(66)
   blockTime        DateTime @db.Timestamptz(6)
   updatedAt        DateTime @updatedAt @db.Timestamptz(6)
+
+  @@schema("backend")
 
   @@map("chain_watermarks")
 }
@@ -303,6 +333,7 @@ model BlockReceipt {
   ingestedAt       DateTime @default(now()) @db.Timestamptz(6)
 
   @@id([chainId, blockNumber])
+  @@schema("backend")
   @@map("block_receipts")
 }
 
@@ -323,6 +354,7 @@ model RawChainEvent {
   @@id([chainId, blockNumber, logIndex])
   @@index([address, topic0, blockNumber])
   @@index([chainId, blockNumber(sort: Desc), logIndex(sort: Desc)])
+  @@schema("backend")
   @@map("raw_chain_events")
 }
 
@@ -362,6 +394,7 @@ model Pool {
   @@unique([chainId, token])
   @@index([status, launchTime(sort: Desc)])
   @@index([creator])
+  @@schema("backend")
   @@map("pools")
 }
 
@@ -382,6 +415,7 @@ model Band {
 
   @@id([chainId, poolId, bandIndex])
   @@index([chainId, poolId, status])
+  @@schema("backend")
   @@map("bands")
 }
 
@@ -395,6 +429,7 @@ model Pot {
   pool            Pool    @relation(fields: [chainId, poolId], references: [chainId, poolId], onDelete: Cascade)
 
   @@id([chainId, poolId])
+  @@schema("backend")
   @@map("pots")
 }
 
@@ -412,6 +447,7 @@ model PluginRegistryEntry {
 
   @@id([chainId, registryIndex])
   @@unique([chainId, plugin])
+  @@schema("backend")
   @@map("plugin_registry")
 }
 
@@ -425,6 +461,7 @@ model EconomicConfig {
   effectiveAt                DateTime @map("effective_time") @db.Timestamptz(6)
 
   @@id([chainId, version])
+  @@schema("backend")
   @@map("economic_configs")
 }
 
@@ -439,6 +476,8 @@ model ProtocolState {
   governanceDelaySeconds BigInt?  @map("governance_delay_seconds")
   lastIndexedBlock       BigInt   @map("last_indexed_block") @default(0)
   updatedAt              DateTime @updatedAt @db.Timestamptz(6)
+
+  @@schema("backend")
 
   @@map("protocol_state")
 }
@@ -456,6 +495,7 @@ model GovernanceOperation {
 
   @@id([chainId, operationId])
   @@index([chainId, status])
+  @@schema("backend")
   @@map("governance_operations")
 }
 
@@ -494,6 +534,7 @@ model PoolStats {
   pool                     Pool     @relation(fields: [chainId, poolId], references: [chainId, poolId], onDelete: Cascade)
 
   @@id([chainId, poolId])
+  @@schema("backend")
   @@map("pool_stats")
 }
 
@@ -514,6 +555,7 @@ model PoolMinuteStats {
 
   @@id([chainId, poolId, minute])
   @@index([poolId, minute(sort: Desc)])
+  @@schema("backend")
   @@map("pool_minute_stats")
 }
 
@@ -534,6 +576,7 @@ model PoolHourStats {
 
   @@id([chainId, poolId, hour])
   @@index([poolId, hour(sort: Desc)])
+  @@schema("backend")
   @@map("pool_hour_stats")
 }
 
@@ -556,6 +599,7 @@ model PoolDayStats {
 
   @@id([chainId, poolId, day])
   @@index([poolId, day(sort: Desc)])
+  @@schema("backend")
   @@map("pool_day_stats")
 }
 
@@ -573,6 +617,7 @@ model ProtocolDayStats {
   updatedAt          DateTime @updatedAt @db.Timestamptz(6)
 
   @@id([chainId, day])
+  @@schema("backend")
   @@map("protocol_day_stats")
 }
 
@@ -584,6 +629,8 @@ model ProtocolStats {
   protocolRevenueTotal   Decimal  @default(0) @map("protocol_revenue_total") @db.Decimal(78, 0)
   claimedTotal           Decimal  @default(0) @map("claimed_total") @db.Decimal(78, 0)
   updatedAt              DateTime @updatedAt @db.Timestamptz(6)
+
+  @@schema("backend")
 
   @@map("protocol_stats")
 }
@@ -612,6 +659,7 @@ model LaunchFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("launches")
 }
 
@@ -633,6 +681,7 @@ model GraduationFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("graduations")
 }
 
@@ -656,6 +705,7 @@ model SwapFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId, timestamp(sort: Desc), logIndex(sort: Desc)], map: "idx_swaps_pool_time")
+  @@schema("backend")
   @@map("swaps")
 }
 
@@ -673,6 +723,7 @@ model CurveDeploymentFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("curve_deployments")
 }
 
@@ -691,6 +742,7 @@ model MilestoneHarvestFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId, bandIndex])
+  @@schema("backend")
   @@map("milestone_harvests")
 }
 
@@ -710,6 +762,7 @@ model HarvestPayoutFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("harvest_payouts")
 }
 
@@ -726,6 +779,7 @@ model BandSkipFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("band_skips")
 }
 
@@ -742,6 +796,7 @@ model DevBuyFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("dev_buys")
 }
 
@@ -758,6 +813,7 @@ model DevBuySkipFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("dev_buy_skips")
 }
 
@@ -777,6 +833,7 @@ model PayoutPotFundingFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("payout_pot_fundings")
 }
 
@@ -792,6 +849,7 @@ model PayoutPotRedemptionFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("payout_pot_redemptions")
 }
 
@@ -808,6 +866,7 @@ model PayoutTipFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("payout_tips")
 }
 
@@ -828,6 +887,7 @@ model PluginPayoutFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("plugin_payouts")
 }
 
@@ -845,6 +905,7 @@ model CreatorAccrualFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId, source])
+  @@schema("backend")
   @@map("creator_accruals")
 }
 
@@ -862,6 +923,7 @@ model ProtocolAccrualFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId, source])
+  @@schema("backend")
   @@map("protocol_accruals")
 }
 
@@ -877,6 +939,7 @@ model CreatorPathAccrualFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("creator_path_accruals")
 }
 
@@ -895,6 +958,7 @@ model ClaimFact {
   @@id([chainId, ordinalKey])
   @@index([holder, timestamp(sort: Desc)])
   @@index([poolId, claimType])
+  @@schema("backend")
   @@map("claims")
 }
 
@@ -911,6 +975,7 @@ model CreatorPathClaimFailureFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("creator_path_claim_failures")
 }
 
@@ -928,6 +993,7 @@ model FeeCollectionFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("fee_collections")
 }
 
@@ -947,6 +1013,7 @@ model FeeRoutingFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("fee_routings")
 }
 
@@ -964,5 +1031,6 @@ model TokenBurnFact {
 
   @@id([chainId, ordinalKey])
   @@index([poolId])
+  @@schema("backend")
   @@map("token_burns")
 }

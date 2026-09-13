@@ -4,6 +4,7 @@ import { BlockchainRegistryService } from '../../infrastructure/blockchain/block
 import { ProtocolReadService } from '../../infrastructure/blockchain/protocol-read.service';
 import { ECONOMICS_CAPS } from '../../protocol/protocol-constants';
 import { pageMeta } from '../../common/pagination/page-result';
+import { resolveChainId } from '../../common/chain-id';
 import { DomainException } from '../../common/http/domain.exception';
 
 /**
@@ -29,7 +30,7 @@ export class ProtocolService {
   ) {}
 
   private chainId(query: { chainId?: number }): number {
-    return query.chainId ?? Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
+    return resolveChainId(query.chainId);
   }
 
   addresses(query: { chainId?: number }) {

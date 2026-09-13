@@ -26,7 +26,7 @@ export class TokenCandlesQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  chainId = 8453;
+  chainId = Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
 }
 
 export class TokenMilestonesQueryDto {
@@ -44,7 +44,7 @@ export class TokenMilestonesQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  chainId = 8453;
+  chainId = Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
 
   get skip(): number {
     return (this.page - 1) * this.limit;
@@ -85,7 +85,7 @@ export class TokenRevenueQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  chainId = 8453;
+  chainId = Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
 
   get skip(): number {
     return (this.page - 1) * this.limit;

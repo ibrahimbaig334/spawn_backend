@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, PrismaService } from '../../infrastructure/database/prisma.service';
 import { pageMeta } from '../../common/pagination/page-result';
+import { resolveChainId } from '../../common/chain-id';
 
 /**
  * Launch record queries. Records link to onchain state via configHash once the
@@ -44,7 +45,7 @@ export class LaunchQueryService {
     const page = Math.max(query.page ?? 1, 1);
     const limit = Math.min(Math.max(query.limit ?? 20, 1), 100);
     const where: Prisma.LaunchRecordWhereInput = {
-      chainId: query.chainId ?? Number(process.env.DEFAULT_CHAIN_ID ?? 8453),
+      chainId: resolveChainId(query.chainId),
       ...(query.creator ? { creatorWallet: query.creator.toLowerCase() } : {}),
       ...(query.state ? { state: query.state as never } : {}),
     };

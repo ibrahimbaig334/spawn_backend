@@ -13,6 +13,7 @@ import { LaunchModule } from './modules/launch/launch.module';
 import { TradingModule } from './modules/trading/trading.module';
 import { ProtocolModule } from './modules/protocol/protocol.module';
 import { KeepersModule } from './modules/keepers/keepers.module';
+import { RpcModule } from './modules/rpc/rpc.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { KeepersModule } from './modules/keepers/keepers.module';
     TradingModule,
     ProtocolModule,
     KeepersModule,
+    RpcModule,
   ],
 })
 export class AppModule {}

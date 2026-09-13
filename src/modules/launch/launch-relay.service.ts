@@ -12,7 +12,8 @@ import {
   launchConfigHash,
   type LaunchConfigInput,
 } from '../../protocol/protocol-math';
-import { decimalToBig } from '../../indexer/decimal-utils';
+import { decimalToBig } from '../../common/decimal-utils';
+import { requestHash } from '../../common/crypto/request-hash';
 
 /**
  * Relayed launch broadcast under the trusted-operator model.
@@ -69,7 +70,7 @@ export class LaunchRelayService {
     // Idempotency reservation keyed by the creator wallet.
     const scope = 'POST:/api/v1/launch/relay';
     const creator = record.creatorWallet.toLowerCase();
-    const requestHash = '0x' + Buffer.from(JSON.stringify({ launchId })).toString('hex');
+    const requestHashValue = requestHash(JSON.stringify({ launchId }));
     const existing = await this.prisma.idempotencyRequest.findUnique({
       where: { scope_walletAddress_key: { scope, walletAddress: creator, key: idempotencyKey } },
     });
@@ -80,7 +81,7 @@ export class LaunchRelayService {
         });
         if (completed) return { response: present(completed), replayed: true };
       }
-      if (existing.requestHash !== requestHash) {
+      if (existing.requestHash !== requestHashValue) {
         throw new DomainException(
           409,
           'IDEMPOTENCY_KEY_REUSED',
@@ -98,7 +99,7 @@ export class LaunchRelayService {
         scope,
         walletAddress: creator,
         key: idempotencyKey,
-        requestHash,
+        requestHash: requestHashValue,
         state: 'IN_PROGRESS',
         expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
       },

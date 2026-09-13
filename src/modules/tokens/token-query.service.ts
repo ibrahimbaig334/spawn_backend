@@ -15,12 +15,20 @@ import { sqrtToEthString } from '../trading/price';
 function s(v: unknown): string {
   if (typeof v === 'string') return v;
   if (typeof v === 'number' || typeof v === 'bigint') return v.toString();
+  // Prisma raw queries decode NUMERIC as Decimal instances (objects with
+  // toFixed); Decimal.toFixed() always renders plain (never exponential).
+  if (v !== null && typeof v === 'object' && typeof (v as { toFixed?: unknown }).toFixed === 'function') {
+    return (v as { toFixed(): string }).toFixed();
+  }
   return '0';
 }
 
 function bigS(v: unknown): bigint {
   const str = s(v);
-  return /^\d+$/.test(str) ? BigInt(str) : 0n;
+  // Tolerate scientific notation defensively (should not occur after s()).
+  if (/^\d+$/.test(str)) return BigInt(str);
+  const n = Number(str);
+  return Number.isFinite(n) ? BigInt(Math.trunc(n)) : 0n;
 }
 
 /**
@@ -153,6 +161,9 @@ export class TokenQueryService {
     if (cached) return this.withFreshness(cached, query.chainId);
 
     const pool = await this.findPool(tokenRef, query.chainId);
+    // Direct on-chain launches have no offchain token row: fall back to the
+    // sink's on-chain token record so name/symbol/uri always resolve.
+    const chainToken = pool.tokenRecord ?? (await this.sinkToken(pool.token));
     const stats = await this.prisma.poolStats.findUnique({
       where: { chainId_poolId: { chainId: query.chainId, poolId: pool.poolId } },
     });
@@ -178,11 +189,11 @@ export class TokenQueryService {
       status: pool.status,
       token: pool.token,
       creator: pool.creator,
-      name: pool.tokenRecord?.name ?? null,
-      symbol: pool.tokenRecord?.symbol ?? null,
+      name: pool.tokenRecord?.name ?? chainToken?.name ?? null,
+      symbol: pool.tokenRecord?.symbol ?? chainToken?.symbol ?? null,
       description: pool.tokenRecord?.description ?? null,
       imageUri: pool.tokenRecord?.imageUri ?? null,
-      uri: pool.tokenRecord?.uri ?? null,
+      uri: pool.tokenRecord?.uri ?? chainToken?.uri ?? null,
       socials: pool.tokenRecord?.socials ?? null,
       launchTime: pool.launchTime,
       totalSupply: pool.totalSupply.toFixed(),
@@ -432,6 +443,13 @@ export class TokenQueryService {
         message: `no launch for ${tokenRef}`,
       });
     return pool;
+  }
+
+  private async sinkToken(token: string): Promise<{ name: string; symbol: string; uri: string } | null> {
+    const rows = await this.prisma.$queryRawUnsafe<{ name: string; symbol: string; uri: string }[]>(
+      `SELECT name, symbol, uri FROM public.tokens WHERE token = '${token.toLowerCase()}'`,
+    );
+    return rows[0] ?? null;
   }
 
   private async withFreshness(

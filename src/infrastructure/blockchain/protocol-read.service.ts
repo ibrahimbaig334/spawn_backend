@@ -114,12 +114,17 @@ export class ProtocolReadService {
     const key = `${chainId}:${poolId}`;
     const cached = this.slot0Cache.get(key);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
-    const value = (await this.clientFactory.client(chainId).readContract({
+    // getSlot0 returns multiple top-level outputs, which viem surfaces as a
+    // positional array (not a named object like struct returns).
+    const raw = (await this.clientFactory.client(chainId).readContract({
       address: book.stateView as Address,
       abi: STATE_VIEW_ABI,
       functionName: 'getSlot0',
       args: [poolId as `0x${string}`],
-    })) as Slot0View;
+    })) as unknown as readonly [bigint, number, number, number] | Slot0View;
+    const value: Slot0View = Array.isArray(raw)
+      ? { sqrtPriceX96: raw[0], tick: Number(raw[1]), protocolFee: Number(raw[2]), lpFee: Number(raw[3]) }
+      : (raw as Slot0View);
     this.slot0Cache.set(key, { value, expiresAt: Date.now() + SLOT0_TTL_MS });
     return value;
   }

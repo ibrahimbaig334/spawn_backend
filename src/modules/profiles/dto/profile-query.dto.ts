@@ -11,5 +11,5 @@ export class ProfileTokensQueryDto extends PaginationDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  chainId = 8453;
+  chainId = Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
 }

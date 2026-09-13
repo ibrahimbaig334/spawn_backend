@@ -23,7 +23,7 @@ export class TokenListQueryDto extends PaginationDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  chainId = 8453;
+  chainId = Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
 }
 
 export class FeaturedTokensQueryDto {
@@ -31,5 +31,5 @@ export class FeaturedTokensQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  chainId = 8453;
+  chainId = Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
 }

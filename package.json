@@ -2,7 +2,7 @@
   "name": "spawn-backend",
   "version": "0.1.0",
   "private": true,
-  "description": "NestJS API, chain indexer, and outbox worker for the Spawn launchpad",
+  "description": "NestJS API and outbox worker for the Spawn launchpad (chain data via Substreams)",
   "license": "UNLICENSED",
   "engines": {
     "node": ">=24.0.0"
@@ -13,8 +13,6 @@
     "start:dev": "node --env-file-if-exists=.env node_modules/@nestjs/cli/bin/nest.js start --watch",
     "start:worker": "node --env-file-if-exists=.env dist/worker.js",
     "worker:dev": "yarn build && node --env-file-if-exists=.env dist/worker.js",
-    "start:indexer": "node --env-file-if-exists=.env dist/indexer.js",
-    "indexer:dev": "yarn build && node --env-file-if-exists=.env dist/indexer.js",
     "start:broadcaster": "node --env-file-if-exists=.env dist/broadcaster.js",
     "broadcaster:dev": "yarn build && node --env-file-if-exists=.env dist/broadcaster.js",
     "manifest:sync": "node --env-file-if-exists=.env node_modules/tsx/dist/cli.mjs scripts/manifest-sync.ts",

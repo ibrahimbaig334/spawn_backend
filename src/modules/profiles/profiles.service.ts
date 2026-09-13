@@ -6,6 +6,7 @@ import type { DomainCachePort } from '../../infrastructure/cache/domain-cache.po
 import { DomainException } from '../../common/http/domain.exception';
 import { isAddress } from 'viem';
 import { pageMeta, type PageResult } from '../../common/pagination/page-result';
+import { resolveChainId } from '../../common/chain-id';
 
 /**
  * Profiles: self-declared wallet identity (username/bio), the user's created
@@ -98,7 +99,7 @@ export class ProfilesService {
     query: { chainId?: number; sort?: string; page?: number; limit?: number },
   ): Promise<PageResult<unknown>> {
     const wallet = normalizeWallet(walletAddress);
-    const chainId = query.chainId ?? Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
+    const chainId = resolveChainId(query.chainId);
     const page = Math.max(query.page ?? 1, 1);
     const limit = Math.min(Math.max(query.limit ?? 20, 1), 100);
     const where: Prisma.PoolWhereInput = {
@@ -136,7 +137,7 @@ export class ProfilesService {
   /** Revenue streams held (RevenueNFT ownership trail lives on-chain; mirrors indexed pools). */
   async revenueStreams(walletAddress: string, query: { chainId?: number }): Promise<unknown[]> {
     const wallet = normalizeWallet(walletAddress);
-    const chainId = query.chainId ?? Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
+    const chainId = resolveChainId(query.chainId);
     const rows = await this.prisma.$queryRawUnsafe<Record<string, unknown>[]>(
       `SELECT p."pool_id", p.status, p.token, t.name, t.symbol,
               COALESCE(s."creator_revenue_total", 0)::text AS "creator_revenue_total",

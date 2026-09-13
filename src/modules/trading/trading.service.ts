@@ -18,6 +18,7 @@ import {
   WALL_WIDTH_LEVELS,
 } from '../../protocol/protocol-constants';
 import { sqrtToEthString, fdvEthWei, levelFromSqrtPrice } from './price';
+import { resolveChainId } from '../../common/chain-id';
 import type { QuoteQueryDto, DepthQueryDto } from './dto/trading-query.dto';
 
 /**
@@ -52,7 +53,7 @@ export class TradingService {
   }
 
   async price(tokenRef: string, query: { chainId?: number }) {
-    const chainId = query.chainId ?? Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
+    const chainId = resolveChainId(query.chainId);
     const pool = await this.poolOrThrow(tokenRef, chainId);
     const stats = await this.prisma.poolStats.findUnique({
       where: { chainId_poolId: { chainId, poolId: pool.poolId } },
@@ -99,7 +100,7 @@ export class TradingService {
   }
 
   async quote(tokenRef: string, query: QuoteQueryDto) {
-    const chainId = query.chainId ?? Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
+    const chainId = resolveChainId(query.chainId);
     const pool = await this.poolOrThrow(tokenRef, chainId);
     const book = this.registry.book(chainId);
     if (!book.v4Quoter) {
@@ -141,7 +142,7 @@ export class TradingService {
   }
 
   async depth(tokenRef: string, query: DepthQueryDto) {
-    const chainId = query.chainId ?? Number(process.env.DEFAULT_CHAIN_ID ?? 8453);
+    const chainId = resolveChainId(query.chainId);
     const buckets = Math.min(Math.max(query.buckets ?? 8, 1), 32);
     const pool = await this.poolOrThrow(tokenRef, chainId);
     const stats = await this.prisma.poolStats.findUnique({

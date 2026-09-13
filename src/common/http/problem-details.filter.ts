@@ -47,7 +47,8 @@ export class ProblemDetailsFilter implements ExceptionFilter {
 
     if (status >= 500) {
       const message = exception instanceof Error ? exception.message : 'Unknown error';
-      this.logger.error(`${request.method} ${request.url} -> ${status}: ${message}`);
+      const stack = exception instanceof Error ? exception.stack : undefined;
+      this.logger.error(`${request.method} ${request.url} -> ${status}: ${message}\n${stack ?? ''}`);
     }
 
     const body: ProblemDetails = {
