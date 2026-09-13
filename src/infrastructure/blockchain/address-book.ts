@@ -28,6 +28,8 @@ export const deploymentManifestSchema = z.object({
   payoutPluginRegistry: addressSchema,
   protocolController: addressSchema,
   buybackAndBurnPlugin: addressSchema.nullish(),
+  // Deploy.s.sol writes this key as `buybackPlugin`.
+  buybackPlugin: addressSchema.nullish(),
   poolManager: addressSchema.optional(),
   stateView: addressSchema.nullish(),
   v4Quoter: addressSchema.nullish(),
@@ -218,7 +220,8 @@ export function buildAddressBook(chainId: number, manifest?: unknown): AddressBo
     revenueNft: protocol.revenueNft!,
     payoutPluginRegistry: protocol.payoutPluginRegistry!,
     protocolController: protocol.protocolController!,
-    buybackAndBurnPlugin: parsed?.buybackAndBurnPlugin ?? undefined,
+    // Deployment artifacts name the key `buybackPlugin`; accept both.
+    buybackAndBurnPlugin: parsed?.buybackAndBurnPlugin ?? parsed?.buybackPlugin ?? undefined,
     poolManager,
     stateView: stateView ?? undefined,
     v4Quoter: v4Quoter ?? undefined,

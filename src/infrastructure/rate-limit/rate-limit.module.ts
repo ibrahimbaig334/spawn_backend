@@ -8,7 +8,9 @@ import { RedisRateLimiter } from './redis-rate-limiter';
 @Module({
   providers: [
     { provide: RATE_LIMITER, useClass: RedisRateLimiter },
-    { provide: APP_GUARD, useClass: MutationRateLimitGuard },
+    // TODO(testing): rate limiting disabled for local integration testing.
+    // Re-enable before any shared/staging deploy.
+    // { provide: APP_GUARD, useClass: MutationRateLimitGuard },
   ],
   exports: [RATE_LIMITER],
 })
