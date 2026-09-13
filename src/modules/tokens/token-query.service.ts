@@ -327,35 +327,37 @@ export class TokenQueryService {
       throw new DomainException(400, 'INVALID_CANDLE_RANGE', 'from must be before to');
     }
     const pool = await this.findPool(tokenRef, query.chainId);
+    // Every interval aggregates from pool_minute_stats. The sink's hour/day
+    // rollups use last-writer-wins for open/high/low across flushes, so any
+    // multi-block bucket there carries wrong OHLC; minute buckets are
+    // single-flush and trustworthy.
+    const bucketMinutes: Record<string, number> = {
+      '1m': 1,
+      '5m': 5,
+      '15m': 15,
+      '1h': 60,
+      '4h': 240,
+      '1d': 1440,
+    };
+    const bucketSize = bucketMinutes[query.interval] ?? 1;
     const timeBounded: string[] = [];
-    if (query.from) timeBounded.push(`AND t >= '${new Date(query.from).toISOString()}'`);
-    if (query.to) timeBounded.push(`AND t < '${new Date(query.to).toISOString()}'`);
+    if (query.from) timeBounded.push(`AND minute >= '${new Date(query.from).toISOString()}'`);
+    if (query.to) timeBounded.push(`AND minute < '${new Date(query.to).toISOString()}'`);
 
-    const direct: Record<string, { table: string; col: string }> = {
-      '1m': { table: 'pool_minute_stats', col: 'minute' },
-      '1h': { table: 'pool_hour_stats', col: 'hour' },
-      '1d': { table: 'pool_day_stats', col: 'day' },
-    };
-    const views: Record<string, string> = {
-      '5m': 'candles_5m',
-      '15m': 'candles_15m',
-      '4h': 'candles_4h',
-    };
-
-    let rows: Record<string, unknown>[];
-    const hit = direct[query.interval];
-    if (hit) {
-      const { table, col } = hit;
-      rows = await this.prisma.$queryRawUnsafe<Record<string, unknown>[]>(
-        `SELECT *, "${col}" AS t FROM ${table} WHERE "chain_id"=${query.chainId} AND "pool_id"='${pool.poolId}'
-         ${timeBounded.join(' ')} ORDER BY "${col}" DESC LIMIT ${query.limit}`,
-      );
-    } else {
-      rows = await this.prisma.$queryRawUnsafe<Record<string, unknown>[]>(
-        `SELECT *, bucket AS t FROM ${views[query.interval]} WHERE "chain_id"=${query.chainId} AND "pool_id"='${pool.poolId}'
-         ${timeBounded.join(' ')} ORDER BY bucket DESC LIMIT ${query.limit}`,
-      );
-    }
+    const rows = await this.prisma.$queryRawUnsafe<Record<string, unknown>[]>(
+      `SELECT to_timestamp(floor(extract(epoch from minute) / ${bucketSize * 60}) * ${bucketSize * 60}) AS t,
+              (array_agg(open_sqrt_x96 ORDER BY minute))[1] AS open_sqrt_x96,
+              (array_agg(close_sqrt_x96 ORDER BY minute DESC))[1] AS close_sqrt_x96,
+              max(high_sqrt_x96) AS high_sqrt_x96,
+              min(low_sqrt_x96) AS low_sqrt_x96,
+              sum(buy_volume_eth) AS buy_volume_eth,
+              sum(sell_volume_eth) AS sell_volume_eth,
+              sum(swap_count) AS swap_count
+       FROM pool_minute_stats
+       WHERE "chain_id"=${query.chainId} AND "pool_id"='${pool.poolId}'
+       ${timeBounded.join(' ')}
+       GROUP BY 1 ORDER BY 1 DESC LIMIT ${query.limit}`,
+    );
 
     return {
       poolId: pool.poolId,
