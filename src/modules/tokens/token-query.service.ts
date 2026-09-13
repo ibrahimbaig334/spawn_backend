@@ -344,20 +344,19 @@ export class TokenQueryService {
     if (query.from) timeBounded.push(`AND minute >= '${new Date(query.from).toISOString()}'`);
     if (query.to) timeBounded.push(`AND minute < '${new Date(query.to).toISOString()}'`);
 
-    const rows = await this.prisma.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT to_timestamp(floor(extract(epoch from minute) / ${bucketSize * 60}) * ${bucketSize * 60}) AS t,
-              (array_agg(open_sqrt_x96 ORDER BY minute))[1] AS open_sqrt_x96,
-              (array_agg(close_sqrt_x96 ORDER BY minute DESC))[1] AS close_sqrt_x96,
-              max(high_sqrt_x96) AS high_sqrt_x96,
-              min(low_sqrt_x96) AS low_sqrt_x96,
-              sum(buy_volume_eth) AS buy_volume_eth,
-              sum(sell_volume_eth) AS sell_volume_eth,
-              sum(swap_count) AS swap_count
+    // Raw minute rows (newest first, bounded), then bucketize + gap-fill in
+    // JS so every candle joins: an empty bucket repeats the previous close
+    // (no trades = price didn't move). Never invents movement; flat only.
+    const rawLimit = Math.min(Math.max(query.limit * bucketSize, query.limit), 20000);
+    const minutes = await this.prisma.$queryRawUnsafe<Record<string, unknown>[]>(
+      `SELECT minute AS t, open_sqrt_x96, close_sqrt_x96, high_sqrt_x96, low_sqrt_x96,
+              buy_volume_eth, sell_volume_eth, swap_count
        FROM pool_minute_stats
        WHERE "chain_id"=${query.chainId} AND "pool_id"='${pool.poolId}'
        ${timeBounded.join(' ')}
-       GROUP BY 1 ORDER BY 1 DESC LIMIT ${query.limit}`,
+       ORDER BY minute DESC LIMIT ${rawLimit}`,
     );
+    const rows = fillJoinedCandles(minutes, bucketSize, query.limit);
 
     return {
       poolId: pool.poolId,
@@ -539,6 +538,123 @@ function cardFromMetrics(r: Record<string, unknown>, imageUri: string | null = n
     protocolRevenueTotal: s(r.protocol_revenue_total),
     imageUri,
   };
+}
+
+type MinuteRow = {
+  minute: Date;
+  open: string;
+  close: string;
+  high: string;
+  low: string;
+  buy: string;
+  sell: string;
+  swaps: string;
+};
+
+/**
+ * Bucketizes minute rows and fills empty buckets with the previous close so
+ * consecutive candles always join (close[i] === open[i+1]). Starts at the
+ * first real bucket (no leading fabrication) and returns at most `limit`
+ * trailing buckets, ascending.
+ */
+function fillJoinedCandles(
+  minutes: Record<string, unknown>[],
+  bucketSize: number,
+  limit: number,
+): Record<string, unknown>[] {
+  const parsed: MinuteRow[] = [];
+  for (const row of minutes) {
+    const t = row.t instanceof Date ? row.t.getTime() : new Date(String(row.t)).getTime();
+    if (!Number.isFinite(t)) continue;
+    const open = s(row.open_sqrt_x96);
+    const close = s(row.close_sqrt_x96);
+    if (open === '0' && close === '0') continue;
+    parsed.push({
+      minute: new Date(t),
+      open,
+      close,
+      high: s(row.high_sqrt_x96),
+      low: s(row.low_sqrt_x96),
+      buy: s(row.buy_volume_eth),
+      sell: s(row.sell_volume_eth),
+      swaps: s(row.swap_count),
+    });
+  }
+  parsed.sort((a, b) => a.minute.getTime() - b.minute.getTime());
+  if (parsed.length === 0) return [];
+
+  const bucketOf = (date: Date): number =>
+    Math.floor(date.getTime() / (bucketSize * 60_000)) * bucketSize;
+  const buckets = new Map<number, MinuteRow[]>();
+  for (const row of parsed) {
+    const key = bucketOf(row.minute);
+    const list = buckets.get(key);
+    if (list) list.push(row);
+    else buckets.set(key, [row]);
+  }
+  const keys = [...buckets.keys()].sort((a, b) => a - b);
+  const first = keys[0]!;
+  const last = keys[keys.length - 1]!;
+
+  const out: Record<string, unknown>[] = [];
+  // Bound the walk: trailing window only (minute units).
+  const maxBuckets = Math.max(limit, 1);
+  const startKey = Math.max(first, last - (maxBuckets - 1) * bucketSize);
+  // Seed continuity from the last real bucket before the window, if any, so
+  // the window's first candle still opens where the market left off.
+  let seed: string | null = null;
+  const before = keys.filter((k) => k < startKey);
+  if (before.length > 0) {
+    const rowsBefore = buckets.get(before[before.length - 1]!)!;
+    seed = rowsBefore[rowsBefore.length - 1]!.close;
+  }
+  let prevClose: string | null = seed;
+  for (let key = startKey; key <= last; key += bucketSize) {
+    const rowsIn = buckets.get(key);
+    if (rowsIn && rowsIn.length > 0) {
+      let high = rowsIn[0]!.high;
+      let low = rowsIn[0]!.low;
+      let buy = 0n;
+      let sell = 0n;
+      let swaps = 0n;
+      for (const r of rowsIn) {
+        // sqrt space: max sqrt = lowest price, min sqrt = highest price.
+        if (BigInt(high) < BigInt(r.high)) high = r.high;
+        if (BigInt(low) > BigInt(r.low)) low = r.low;
+        buy += BigInt(r.buy);
+        sell += BigInt(r.sell);
+        swaps += BigInt(r.swaps);
+      }
+      // Chain: every candle opens where the previous closed. The wick
+      // stretches to cover the chained open so OHLC stays consistent.
+      const open = prevClose ?? rowsIn[0]!.open;
+      if (BigInt(high) < BigInt(open)) high = open;
+      if (BigInt(low) > BigInt(open)) low = open;
+      prevClose = rowsIn[rowsIn.length - 1]!.close;
+      out.push({
+        t: new Date(key * 60_000).toISOString(),
+        open_sqrt_x96: open,
+        close_sqrt_x96: prevClose,
+        high_sqrt_x96: high,
+        low_sqrt_x96: low,
+        buy_volume_eth: buy.toString(),
+        sell_volume_eth: sell.toString(),
+        swap_count: swaps.toString(),
+      });
+    } else if (prevClose !== null) {
+      out.push({
+        t: new Date(key * 60_000).toISOString(),
+        open_sqrt_x96: prevClose,
+        close_sqrt_x96: prevClose,
+        high_sqrt_x96: prevClose,
+        low_sqrt_x96: prevClose,
+        buy_volume_eth: '0',
+        sell_volume_eth: '0',
+        swap_count: '0',
+      });
+    }
+  }
+  return out.slice(-maxBuckets);
 }
 
 function candlePresenter(row: Record<string, unknown>): Record<string, unknown> {
