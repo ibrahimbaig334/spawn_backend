@@ -31,6 +31,12 @@ export class TokensController {
     return this.queries.list(query);
   }
 
+  @Get('milestones/board')
+  @ApiOperation({ operationId: 'getMilestoneBoard' })
+  milestoneBoard(@Query() query: FeaturedTokensQueryDto): Promise<unknown> {
+    return this.queries.milestoneBoard(query.chainId);
+  }
+
   @Get('featured')
   @ApiOperation({ operationId: 'getFeaturedTokens' })
   featured(@Query() query: FeaturedTokensQueryDto): Promise<unknown> {

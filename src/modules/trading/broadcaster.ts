@@ -3,6 +3,8 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { Client } from 'pg';
 import { sqrtToEthString } from './price';
 
+export type PgClientFactory = () => Client;
+
 /**
  * WS broadcaster (backend guide §4): Postgres is the source of truth; the stream
  * is delivery.
@@ -23,6 +25,7 @@ type Bar = {
   highSqrt: bigint;
   lowSqrt: bigint;
   buyEth: bigint;
+  sellEth: bigint;
   trades: number;
   lastPushAt: number;
   timer?: ReturnType<typeof setTimeout>;
@@ -40,46 +43,139 @@ export class Broadcaster {
   private wss?: WebSocketServer;
   private server?: Server;
   private readonly bars = new Map<string, Bar>();
-  private readonly clients = new Map<WebSocket, string | null>();
+  private readonly clients = new Map<WebSocket, Set<string>>();
+  private readonly recentTicks = new Map<string, Record<string, unknown>[]>();
   private connected = false;
 
+  private pg!: Client;
+  private heartbeat?: ReturnType<typeof setInterval>;
+
   constructor(
-    private readonly pg: Client,
+    private readonly pgFactory: PgClientFactory,
     private readonly port: number,
   ) {}
 
   async start(): Promise<void> {
-    await this.pg.connect();
-    await this.pg.query('LISTEN spawn_trades');
-    await this.pg.query('LISTEN spawn_pools');
-    this.pg.on('notification', (msg) => this.onNotification(msg.channel ?? '', msg.payload));
-    this.pg.on('error', (error) => {
-      console.error('broadcaster pg error:', error.message);
-    });
+    await this.connectPg();
 
     this.server = createServer();
-    this.wss = new WebSocketServer({ server: this.server, path: '/ws' });
+    this.wss = new WebSocketServer({
+      server: this.server,
+      path: '/ws',
+      perMessageDeflate: { threshold: 512 },
+    });
     this.wss.on('connection', (socket, request) => {
       const url = new URL(request.url ?? '/ws', 'http://localhost');
-      const pool = url.searchParams.get('pool')?.toLowerCase() ?? null;
-      this.clients.set(socket, pool);
+      const legacy = url.searchParams.get('pool')?.toLowerCase() ?? null;
+      const subs = new Set<string>(legacy ? [legacy] : []);
+      this.clients.set(socket, subs);
+      socket.on('pong', () => {
+        (socket as WebSocket & { isAlive?: boolean }).isAlive = true;
+      });
+      socket.on('message', (raw) => {
+        let msg: { op?: string; pools?: unknown };
+        try {
+          msg = JSON.parse(String(raw)) as { op?: string; pools?: unknown };
+        } catch {
+          return;
+        }
+        const pools = Array.isArray(msg.pools)
+          ? msg.pools.filter((p): p is string => typeof p === 'string').map((p) => p.toLowerCase())
+          : [];
+        if (msg.op === 'sub') {
+          for (const pool of pools) {
+            subs.add(pool);
+            // Snapshot on subscribe: current bar + recent ticks, so clients
+            // render immediately instead of REST-refetching.
+            const bar = this.bars.get(pool);
+            if (bar) socket.send(JSON.stringify(barMessage(pool, bar, false)));
+            for (const tick of this.recentTicks.get(pool) ?? []) {
+              socket.send(JSON.stringify(tick));
+            }
+          }
+        } else if (msg.op === 'unsub') {
+          for (const pool of pools) subs.delete(pool);
+        }
+      });
       socket.on('close', () => this.clients.delete(socket));
       socket.on('error', () => this.clients.delete(socket));
-      if (pool) {
-        const bar = this.bars.get(pool);
-        if (bar) socket.send(JSON.stringify(barMessage(pool, bar, false)));
+      if (legacy) {
+        const bar = this.bars.get(legacy);
+        if (bar) socket.send(JSON.stringify(barMessage(legacy, bar, false)));
       }
     });
+    // Heartbeat: terminate sockets that miss two pongs so dead TCP peers
+    // (laptops asleep, dropped NAT) stop lingering as "connected".
+    this.heartbeat = setInterval(() => {
+      for (const socket of this.clients.keys()) {
+        const alive = socket as WebSocket & { isAlive?: boolean };
+        if (alive.isAlive === false) {
+          socket.terminate();
+          this.clients.delete(socket);
+          continue;
+        }
+        alive.isAlive = false;
+        socket.ping();
+      }
+    }, 30_000);
+    this.heartbeat.unref?.();
     await new Promise<void>((resolve) => this.server!.listen(this.port, '0.0.0.0', resolve));
     this.connected = true;
     console.log(`broadcaster listening on :${this.port}/ws (pool param optional)`);
   }
 
+  /** Connects the LISTEN client; reconnects with backoff on any failure. */
+  private async connectPg(): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        this.pg = this.pgFactory();
+        await this.pg.connect();
+        await this.pg.query('LISTEN spawn_trades');
+        await this.pg.query('LISTEN spawn_pools');
+    await this.pg.query('LISTEN spawn_harvests');
+    await this.pg.query('LISTEN spawn_comments');
+        this.pg.on('notification', (msg) => this.onNotification(msg.channel ?? '', msg.payload));
+        this.pg.on('error', (error) => {
+          console.error('broadcaster pg error:', error.message);
+          void this.reconnectPg();
+        });
+        this.pg.on('end', () => {
+          void this.reconnectPg();
+        });
+        if (attempt > 0) console.log('broadcaster pg reconnected');
+        return;
+      } catch (error) {
+        const delay = Math.min(1_000 * 2 ** Math.min(attempt, 5), 30_000);
+        console.error(
+          `broadcaster pg connect failed (attempt ${attempt + 1}):`,
+          error instanceof Error ? error.message : error,
+          `- retrying in ${delay}ms`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  private reconnecting = false;
+
+  private async reconnectPg(): Promise<void> {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+    try {
+      await this.pg.end().catch(() => undefined);
+    } catch {
+      /* already dead */
+    }
+    await this.connectPg();
+    this.reconnecting = false;
+  }
+
   stop(): void {
+    if (this.heartbeat) clearInterval(this.heartbeat);
     for (const bar of this.bars.values()) if (bar.timer) clearTimeout(bar.timer);
     this.wss?.close();
     this.server?.close();
-    void this.pg.end();
+    void this.pg.end().catch(() => undefined);
   }
 
   private onNotification(channel: string, payload: string | undefined): void {
@@ -92,6 +188,20 @@ export class Broadcaster {
     }
     if (channel === 'spawn_trades') this.onTrade(data);
     else if (channel === 'spawn_pools') this.broadcast({ type: 'pool', ...data });
+    else if (channel === 'spawn_comments') {
+      // Comments are keyed by offchain token UUID; clients invalidate their
+      // comment queries on this rare event (no per-pool routing needed).
+      this.broadcast({ type: 'comment', tokenDbId: str(data.token_db_id), ts: data.ts });
+    }
+    else if (channel === 'spawn_harvests') {
+      this.broadcast({
+        type: 'harvest',
+        pool: str(data.pool_id).toLowerCase(),
+        bandIndex: Number(data.band_index ?? 0),
+        grossQuoteWei: str(data.gross_quote),
+        ts: data.ts,
+      });
+    }
   }
 
   private onTrade(t: Record<string, unknown>): void {
@@ -102,21 +212,26 @@ export class Broadcaster {
     const tsSec = Number(str(t.ts));
     const priceEth = sqrt > 0n ? sqrtToEthString(sqrt) : null;
 
-    this.broadcast(
-      {
-        type: 'tick',
-        pool,
-        isBuy,
-        priceEth,
-        sqrt: t.sqrt,
-        eth: t.eth,
-        tokens: t.tokens,
-        ts: t.ts,
-        block: t.block,
-        tx: t.tx,
-      },
+    const tick = {
+      type: 'tick',
       pool,
-    );
+      isBuy,
+      priceEth,
+      sqrt: t.sqrt,
+      eth: t.eth,
+      tokens: t.tokens,
+      ts: t.ts,
+      block: t.block,
+      tx: t.tx,
+    };
+    const ring = this.recentTicks.get(pool);
+    if (ring) {
+      ring.push(tick);
+      if (ring.length > 30) ring.shift();
+    } else {
+      this.recentTicks.set(pool, [tick]);
+    }
+    this.broadcast(tick, pool);
 
     const bucketMs = tsSec * 1000 - ((tsSec * 1000) % MINUTE_MS);
     let bar = this.bars.get(pool);
@@ -132,6 +247,7 @@ export class Broadcaster {
         highSqrt: sqrt,
         lowSqrt: sqrt,
         buyEth: 0n,
+        sellEth: 0n,
         trades: 0,
         lastPushAt: 0,
       };
@@ -141,6 +257,7 @@ export class Broadcaster {
     bar.highSqrt = sqrt > bar.highSqrt ? sqrt : bar.highSqrt;
     bar.lowSqrt = sqrt < bar.lowSqrt ? sqrt : bar.lowSqrt;
     if (isBuy) bar.buyEth += eth;
+    else bar.sellEth += eth;
     bar.trades += 1;
 
     const now = Date.now();
@@ -166,9 +283,20 @@ export class Broadcaster {
 
   private broadcast(message: unknown, onlyPool?: string): void {
     const text = JSON.stringify(message);
-    for (const [socket, pool] of this.clients) {
-      if (onlyPool && pool && pool !== onlyPool) continue;
-      if (socket.readyState === socket.OPEN) socket.send(text);
+    for (const [socket, subs] of this.clients) {
+      // Ticks/bars go only to subscribers of that pool; lifecycle events
+      // (onlyPool undefined) reach everyone — they are rare.
+      if (onlyPool && !subs.has(onlyPool)) continue;
+      if (socket.readyState !== socket.OPEN) continue;
+      // Backpressure: slow consumers get skipped before they balloon memory;
+      // pathologically stalled ones are culled outright.
+      if (socket.bufferedAmount > 8_000_000) {
+        socket.terminate();
+        this.clients.delete(socket);
+        continue;
+      }
+      if (socket.bufferedAmount > 1_000_000) continue;
+      socket.send(text);
     }
   }
 }
@@ -184,7 +312,9 @@ function barMessage(pool: string, bar: Bar, final: boolean): Record<string, unkn
     high: sqrtToEthString(bar.lowSqrt),
     low: sqrtToEthString(bar.highSqrt),
     close: sqrtToEthString(bar.close),
-    volEth: bar.buyEth.toString(),
+    volEth: (bar.buyEth + bar.sellEth).toString(),
+    buyVolEth: bar.buyEth.toString(),
+    sellVolEth: bar.sellEth.toString(),
     trades: bar.trades,
   };
 }

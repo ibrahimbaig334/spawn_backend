@@ -5,9 +5,12 @@ import { DomainException } from '../../../common/http/domain.exception';
 import { countCodePoints } from '../../../common/validation/text';
 
 export class CreateCommentDto {
+  // Deprecated: the author is the authenticated session wallet (JWT sub).
+  // Kept optional for transport compatibility; the controller overrides it.
+  @IsOptional()
   @Transform(({ value }) => normalizeWallet(value))
   @IsString()
-  walletAddress!: string;
+  walletAddress?: string;
 
   @Transform(({ value }) => normalizeText(value))
   @IsString()

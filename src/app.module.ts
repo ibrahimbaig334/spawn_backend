@@ -14,6 +14,7 @@ import { TradingModule } from './modules/trading/trading.module';
 import { ProtocolModule } from './modules/protocol/protocol.module';
 import { KeepersModule } from './modules/keepers/keepers.module';
 import { RpcModule } from './modules/rpc/rpc.module';
+import { AuthModule } from './modules/auth/auth.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { RpcModule } from './modules/rpc/rpc.module';
     DatabaseModule,
     CacheModule,
     RateLimitModule,
+    AuthModule,
     BlockchainModule,
     HealthModule,
     TokensModule,

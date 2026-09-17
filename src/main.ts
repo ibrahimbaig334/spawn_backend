@@ -27,7 +27,14 @@ async function bootstrap(): Promise<void> {
 
   await app.register(helmet);
   app.setGlobalPrefix('api/v1');
-  app.enableCors({ origin: environment.corsOrigins, credentials: true });
+  app.enableCors({
+    origin: environment.corsOrigins,
+    credentials: true,
+    // Wallet-session writes use PUT/DELETE (likes); without these the browser
+    // preflight rejects them with the default GET,HEAD,POST list.
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'],
+  });
   app.enableShutdownHooks();
   app.useGlobalPipes(
     new TrimStringsPipe(),

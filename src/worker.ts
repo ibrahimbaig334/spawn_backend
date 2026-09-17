@@ -21,8 +21,9 @@ async function bootstrap(): Promise<void> {
   const refresh = async () => {
     try {
       await prisma.$executeRawUnsafe('REFRESH MATERIALIZED VIEW CONCURRENTLY leaderboard_daily');
+      await prisma.$executeRawUnsafe('REFRESH MATERIALIZED VIEW CONCURRENTLY pool_metrics_24h');
     } catch (error) {
-      logger.warn(`leaderboard refresh failed: ${(error as Error).message}`);
+      logger.warn(`rollup refresh failed: ${(error as Error).message}`);
     }
   };
   const leaderboardTimer = setInterval(() => void refresh(), 30_000);
@@ -35,7 +36,7 @@ async function bootstrap(): Promise<void> {
     clearInterval(leaderboardTimer);
     void app.close();
   });
-  logger.log('Outbox worker started (leaderboard refresh every 30s)');
+  logger.log('Outbox worker started (rollup refreshes every 30s)');
 }
 
 void bootstrap();

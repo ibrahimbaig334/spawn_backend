@@ -1,5 +1,5 @@
 import { IsIn, IsInt, IsOptional, IsString, Matches, Min } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import { PaginationDto } from '../../../common/pagination/pagination.dto';
 import 'reflect-metadata';
 
@@ -17,8 +17,16 @@ export class TokenListQueryDto extends PaginationDto {
   phase?: 'bonding' | 'graduated';
 
   @IsOptional()
-  @IsIn(['newest', 'oldest', 'market_cap', 'volume', 'graduated'])
-  sort: 'newest' | 'oldest' | 'market_cap' | 'volume' | 'graduated' = 'newest';
+  @IsIn(['newest', 'oldest', 'market_cap', 'volume', 'graduated', 'milestones', 'next_payout'])
+  sort: 'newest' | 'oldest' | 'market_cap' | 'volume' | 'graduated' | 'milestones' | 'next_payout' = 'newest';
+
+  @IsOptional()
+  @Transform(({ value }) => value === '1' || value === 'true')
+  near?: boolean;
+
+  @IsOptional()
+  @Transform(({ value }) => value === '1' || value === 'true')
+  paid?: boolean;
 
   @Type(() => Number)
   @IsInt()

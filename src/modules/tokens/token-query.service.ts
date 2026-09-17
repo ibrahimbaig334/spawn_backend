@@ -7,9 +7,10 @@ import { APP_ENVIRONMENT } from '../../config/config.constants';
 import type { Environment } from '../../config/environment';
 import { DomainException } from '../../common/http/domain.exception';
 import { pageMeta, type PageResult } from '../../common/pagination/page-result';
-import { bandLevels } from '../../protocol/protocol-math';
+import { bandLevels, sqrtPriceAtLevel } from '../../protocol/protocol-math';
 import { PROTOCOL_TEMPLATE_DEFAULT as T } from '../../protocol/protocol-constants';
-import { sqrtToEthString } from '../trading/price';
+import { levelFromSqrtPrice, sqrtToEthString } from '../trading/price';
+import { resolveChainId } from '../../common/chain-id';
 
 /** pg numeric/bigint columns arrive as strings; tolerate number/unknown shapes. */
 function s(v: unknown): string {
@@ -22,6 +23,16 @@ function s(v: unknown): string {
   }
   return '0';
 }
+
+// Graduation market cap in wei: 8 ETH (matches the frontend's curve math).
+const GRADUATION_MCAP_WEI = 8n * 10n ** 18n;
+
+// Harvest-aggregate lateral join, shared by list + board queries.
+const LATERAL_HARVESTS = `LEFT JOIN LATERAL (
+  SELECT count(*)::int AS paid, max("timestamp") AS last_payout_at, sum(net_quote) AS net_eth
+  FROM harvest_payouts hp
+  WHERE hp."chain_id" = pm."chain_id" AND hp."pool_id" = pm."pool_id"
+) m ON true`;
 
 function bigS(v: unknown): bigint {
   const str = s(v);
@@ -43,6 +54,8 @@ type ListQuery = {
   creator?: string;
   phase?: 'bonding' | 'graduated';
   sort: string;
+  near?: boolean;
+  paid?: boolean;
   page: number;
   limit: number;
   skip: number;
@@ -122,12 +135,19 @@ export class TokenQueryService {
     const cached = await this.cache.get<PageResult<unknown>>(key);
     if (cached) return cached;
 
-    const where: string[] = [`"chain_id" = ${query.chainId}`];
-    if (query.phase) where.push(`status = '${query.phase}'`);
-    if (query.creator) where.push(`creator = '${query.creator.toLowerCase()}'`);
+    const where: string[] = [`pm."chain_id" = ${query.chainId}`];
+    // "Near graduation": bonding pools within 20% of the graduation cap.
+    if (query.near) {
+      where.push(`pm.status = 'bonding'`);
+      where.push(`pm.mcap_wei >= ${(GRADUATION_MCAP_WEI * 8n) / 10n}`);
+    }
+    // "Paying now": at least one milestone payout harvested.
+    if (query.paid) where.push('COALESCE(m.paid, 0) > 0');
+    if (query.phase) where.push(`pm.status = '${query.phase}'`);
+    if (query.creator) where.push(`pm.creator = '${query.creator.toLowerCase()}'`);
     if (query.q) {
       const q = query.q.replace(/'/g, "''");
-      where.push(`(name ILIKE '%${q}%' OR symbol ILIKE '%${q}%')`);
+      where.push(`(pm.name ILIKE '%${q}%' OR pm.symbol ILIKE '%${q}%')`);
     }
     const order =
       query.sort === 'oldest'
@@ -138,14 +158,90 @@ export class TokenQueryService {
             ? 'mcap_wei DESC NULLS LAST'
             : query.sort === 'volume'
               ? '(COALESCE("buy_volume_eth",0) + COALESCE("sell_volume_eth",0)) DESC NULLS LAST'
-              : '"launch_time" DESC';
+              : query.sort === 'milestones'
+                ? 'COALESCE(m.paid, 0) DESC, m.last_payout_at DESC NULLS LAST, "launch_time" DESC'
+                : '"launch_time" DESC';
 
     const countRows = await this.prisma.$queryRawUnsafe<{ c: number }[]>(
-      `SELECT count(*)::int AS c FROM pool_metrics WHERE ${where.join(' AND ')}`,
+      `SELECT count(*)::int AS c FROM pool_metrics pm ${query.paid ? LATERAL_HARVESTS : ''} WHERE ${where.join(' AND ')}`,
     );
+    // "Next payout soon": graduated pools ordered by how close the price is
+    // to crossing the next milestone. Proximity needs the audited level math
+    // (bandLevels + levelFromSqrtPrice), which lives in Node — so this sort
+    // fetches all graduated pools (a bounded set), computes, sorts, paginates.
+    if (query.sort === 'next_payout') {
+      const rows = await this.prisma.$queryRawUnsafe<Record<string, unknown>[]>(
+        `SELECT pm.*, COALESCE(m.paid, 0) AS milestones_paid, m.last_payout_at, COALESCE(m.net_eth, 0) AS net_paid_eth
+         FROM pool_metrics pm
+         ${LATERAL_HARVESTS}
+         WHERE pm."chain_id" = ${query.chainId} AND pm.status = 'graduated' AND pm.graduation_level IS NOT NULL`,
+      );
+      const scored = rows
+        .map((r) => {
+          const paid = Number(r.milestones_paid ?? 0);
+          const grad = Number(r.graduation_level);
+          const sqrt = bigS(r.last_price_sqrt_x96);
+          let proximity: number | null = null;
+          if (sqrt > 0n) {
+            const level = levelFromSqrtPrice(sqrt);
+            const geom = bandLevels(grad, T.bandFirstStepLevels, T.bandStepDecayLevels, T.bandLevelSpacing, T.bandWidthLevels, paid);
+            if (geom.exists) {
+              const from =
+                paid === 0
+                  ? grad
+                  : bandLevels(grad, T.bandFirstStepLevels, T.bandStepDecayLevels, T.bandLevelSpacing, T.bandWidthLevels, paid - 1).levelUpper;
+              const span = geom.levelLower - from;
+              if (span > 0) proximity = Math.min(0.99, Math.max(0, (level - from) / span));
+            }
+          }
+          return { r, proximity };
+        })
+        .filter((x) => x.proximity !== null)
+        .sort((a, b) => (b.proximity as number) - (a.proximity as number));
+      const total = scored.length;
+      const pageRowsAll = scored
+        .slice(query.skip, query.skip + query.limit)
+        .map(({ r, proximity }): Record<string, unknown> => ({ ...r, next_payout_proximity: proximity }));
+      const images = await this.imageMap(
+        query.chainId,
+        pageRowsAll.map((r) => String(r.token ?? '').toLowerCase()).filter(Boolean),
+      );
+      const result: PageResult<unknown> = {
+        data: pageRowsAll.map((r) => cardFromMetrics(r, images.get(String(r.token ?? '').toLowerCase()) ?? null)),
+        meta: pageMeta(query.page, query.limit, total),
+      };
+      await this.cache.set(key, result, { ttlSeconds: CACHE_TTL_SECONDS.tokenList });
+      return result;
+    }
+
+    // Milestone payout aggregates per pool (harvest events from the sink).
+    // Lateral join keeps it one query.
     const pageRows = await this.prisma.$queryRawUnsafe<Record<string, unknown>[]>(
-      `SELECT * FROM pool_metrics WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ${query.limit} OFFSET ${query.skip}`,
+      `SELECT pm.*, COALESCE(m.paid, 0) AS milestones_paid, m.last_payout_at, COALESCE(m.net_eth, 0) AS net_paid_eth
+       FROM pool_metrics pm
+       ${LATERAL_HARVESTS}
+       WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ${query.limit} OFFSET ${query.skip}`,
     );
+
+    // Pre-launch fill: tokens provisioned offchain have no pool_stats yet, so
+    // their card would show "-". The opening price is fixed by the curve
+    // (sqrt at the pool's opening level) and supply is fixed at launch —
+    // present those instead of gaps.
+    for (const r of pageRows) {
+      if (bigS(r.last_price_sqrt_x96) > 0n) continue;
+      const openingSqrt = sqrtPriceAtLevel(Number(r.opening_level ?? 0));
+      if (openingSqrt === 0n) continue;
+      r.last_price_sqrt_x96 = openingSqrt.toString();
+      const totalSupply = bigS(r.total_supply);
+      const circulating =
+        r.circulating_supply === null || r.circulating_supply === undefined
+          ? totalSupply
+          : bigS(r.circulating_supply);
+      r.mcap_wei = (circulating << 192n) / (openingSqrt * openingSqrt);
+      r.fdv_wei = (totalSupply << 192n) / (openingSqrt * openingSqrt);
+      r.ath_mcap_wei = null;
+      r.pre_launch = true;
+    }
 
     const images = await this.imageMap(
       query.chainId,
@@ -158,6 +254,129 @@ export class TokenQueryService {
       meta: pageMeta(query.page, query.limit, countRows[0]?.c ?? 0),
     };
     await this.cache.set(key, result, { ttlSeconds: CACHE_TTL_SECONDS.tokenList });
+    return result;
+  }
+
+  /**
+   * The milestone board: per-pool payout aggregates, recent payout events,
+   * protocol-wide totals, and which graduated pools are next to pay. This is
+   * the protocol's proof-of-work page — milestones are the USP.
+   */
+  async milestoneBoard(chainIdQuery?: number) {
+    const chainId = resolveChainId(chainIdQuery);
+    const cacheKey = `milestones:board:${chainId}`;
+    const cached = await this.cache.get<Record<string, unknown>>(cacheKey);
+    if (cached) return cached;
+
+    const rows = await this.prisma.$queryRawUnsafe<Record<string, unknown>[]>(
+      `SELECT pm.pool_id, pm.token, pm.creator, pm.status, pm.name, pm.symbol,
+              pm.mcap_wei, pm.graduation_level, pm.launch_time, pm.total_supply, pm.circulating_supply,
+              pm.last_price_sqrt_x96,
+              COALESCE(m.paid, 0) AS paid, m.last_payout_at, COALESCE(m.net_eth, 0) AS net_eth
+       FROM pool_metrics pm
+       LEFT JOIN LATERAL (
+         SELECT count(*)::int AS paid, max("timestamp") AS last_payout_at, sum(net_quote) AS net_eth
+         FROM harvest_payouts hp
+         WHERE hp."chain_id" = pm."chain_id" AND hp."pool_id" = pm."pool_id"
+       ) m ON true
+       WHERE pm."chain_id" = ${chainId}
+       ORDER BY COALESCE(m.paid, 0) DESC, m.last_payout_at DESC NULLS LAST, pm."launch_time" DESC
+       LIMIT 50`,
+    );
+    const images = await this.imageMap(
+      chainId,
+      rows.map((r) => String(r.token ?? '').toLowerCase()).filter(Boolean),
+    );
+
+    const nextUp: Record<string, unknown>[] = [];
+    const leaders = rows.map((r) => {
+      const paid = Number(r.paid ?? 0);
+      const grad = r.graduation_level === null || r.graduation_level === undefined ? null : Number(r.graduation_level);
+      let nextIn: number | null = null;
+      let nextIndex: number | null = null;
+      if (r.status === 'graduated' && grad !== null) {
+        const sqrt = bigS(r.last_price_sqrt_x96);
+        if (sqrt > 0n) {
+          const level = levelFromSqrtPrice(sqrt);
+          nextIndex = paid;
+          const geom = bandLevels(grad, T.bandFirstStepLevels, T.bandStepDecayLevels, T.bandLevelSpacing, T.bandWidthLevels, nextIndex);
+          if (geom.exists) {
+            const from =
+              paid === 0
+                ? grad
+                : bandLevels(grad, T.bandFirstStepLevels, T.bandStepDecayLevels, T.bandLevelSpacing, T.bandWidthLevels, paid - 1).levelUpper;
+            const span = geom.levelLower - from;
+            if (span > 0) {
+              nextIn = Math.min(0.99, Math.max(0, (level - from) / span));
+              nextUp.push({
+                poolId: r.pool_id,
+                symbol: r.symbol,
+                name: r.name,
+                imageUri: images.get(String(r.token ?? '').toLowerCase()) ?? null,
+                nextIndex,
+                proximityPct: Math.round(nextIn * 100),
+                mcapEthWei: r.mcap_wei === null ? null : s(r.mcap_wei),
+              });
+            }
+          }
+        }
+      }
+      return {
+        poolId: r.pool_id,
+        token: r.token,
+        symbol: r.symbol,
+        name: r.name,
+        status: r.status,
+        imageUri: images.get(String(r.token ?? '').toLowerCase()) ?? null,
+        mcapEthWei: r.mcap_wei === null ? null : s(r.mcap_wei),
+        milestonesPaid: paid,
+        milestonesTotal: T.coreBandCount,
+        netPaidEthWei: s(r.net_eth),
+        lastPayoutAt: r.last_payout_at ?? null,
+        nextIn,
+        nextIndex,
+      };
+    });
+    nextUp.sort((a, b) => (b.proximityPct as number) - (a.proximityPct as number));
+
+    const [events, totalsRows] = await Promise.all([
+      this.prisma.$queryRawUnsafe<Record<string, unknown>[]>(
+        `SELECT hp.pool_id, hp.milestone_index, hp.net_quote::text AS net_quote, hp."timestamp" AS ts,
+                t.symbol, t.name
+         FROM harvest_payouts hp
+         JOIN pools p ON p.pool_id = hp.pool_id
+         LEFT JOIN tokens t ON t."chain_id" = hp."chain_id" AND t.token = p.token
+         WHERE hp."chain_id" = ${chainId}
+         ORDER BY hp."timestamp" DESC, hp."log_index" DESC
+         LIMIT 20`,
+      ),
+      this.prisma.$queryRawUnsafe<Record<string, unknown>[]>(
+        `SELECT count(*)::int AS payouts,
+                COALESCE(sum(net_quote), 0) AS distributed,
+                count(*) FILTER (WHERE "timestamp" >= now() - interval '24 hours')::int AS payouts_24h
+         FROM harvest_payouts WHERE "chain_id" = ${chainId}`,
+      ),
+    ]);
+    const totals = totalsRows[0] ?? {};
+
+    const result = {
+      totals: {
+        distributedEthWei: s(totals.distributed),
+        payouts: Number(totals.payouts ?? 0),
+        payouts24h: Number(totals.payouts_24h ?? 0),
+      },
+      leaders,
+      nextUp: nextUp.slice(0, 10),
+      events: events.map((e) => ({
+        poolId: e.pool_id,
+        symbol: e.symbol,
+        name: e.name,
+        milestoneIndex: Number(e.milestone_index ?? 0),
+        netEthWei: s(e.net_quote),
+        timestamp: e.ts,
+      })),
+    };
+    await this.cache.set(cacheKey, result, { ttlSeconds: CACHE_TTL_SECONDS.tokenList });
     return result;
   }
 
@@ -514,6 +733,17 @@ export class TokenQueryService {
   }
 }
 
+/** Δ24h from the view's 24h-ago close sqrt; null when history is shorter. */
+function priceChange24h(r: Record<string, unknown>): number | null {
+  const now = bigS(r.last_price_sqrt_x96);
+  const then = bigS(r.price_24h_ago_sqrt_x96);
+  if (now === 0n || then === 0n) return null;
+  const priceNow = Number(sqrtToEthString(now));
+  const priceThen = Number(sqrtToEthString(then));
+  if (!Number.isFinite(priceNow) || !Number.isFinite(priceThen) || priceThen === 0) return null;
+  return ((priceNow - priceThen) / priceThen) * 100;
+}
+
 function cardFromMetrics(r: Record<string, unknown>, imageUri: string | null = null): Record<string, unknown> {
   const lastSqrt = bigS(r.last_price_sqrt_x96);
   return {
@@ -533,9 +763,17 @@ function cardFromMetrics(r: Record<string, unknown>, imageUri: string | null = n
     athMcapEthWei: r.ath_mcap_wei === null ? null : s(r.ath_mcap_wei),
     buyVolumeEth: s(r.buy_volume_eth),
     sellVolumeEth: s(r.sell_volume_eth),
+    volume24hEth: r.vol_24h_wei === null || r.vol_24h_wei === undefined ? null : s(r.vol_24h_wei),
+    priceChange24h: priceChange24h(r),
     swapCount: s(r.swap_count),
     creatorRevenueTotal: s(r.creator_revenue_total),
     protocolRevenueTotal: s(r.protocol_revenue_total),
+    milestonesPaid: Number(r.milestones_paid ?? 0),
+    milestonesTotal: T.coreBandCount,
+    lastPayoutAt: r.last_payout_at ?? null,
+    netPaidEthWei: s(r.net_paid_eth),
+    nextPayoutProximity: r.next_payout_proximity === null || r.next_payout_proximity === undefined ? null : Number(r.next_payout_proximity),
+    preLaunch: r.pre_launch === true,
     imageUri,
   };
 }

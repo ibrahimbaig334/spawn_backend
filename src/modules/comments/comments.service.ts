@@ -3,6 +3,7 @@ import { ConflictException, Inject, Injectable, NotFoundException } from '@nestj
 import { IdempotencyState, Prisma } from '@prisma/client';
 import { canonicalize } from 'json-canonicalize';
 import { requestHash } from '../../common/crypto/request-hash';
+import { DomainException } from '../../common/http/domain.exception';
 import { pageMeta, type PageResult } from '../../common/pagination/page-result';
 import { CACHE_MANAGER } from '../../infrastructure/cache/cache.constants';
 import { CACHE_TTL_SECONDS } from '../../infrastructure/cache/cache-ttl';
@@ -29,6 +30,12 @@ export class CommentsService {
     input: CreateCommentDto,
     idempotencyKey: string,
   ): Promise<{ value: unknown; replayed: boolean }> {
+    // The author wallet is the authenticated session wallet, injected by the
+    // controller — comments are never attributed to a client-supplied address.
+    const wallet = input.walletAddress;
+    if (!wallet) {
+      throw new DomainException(401, 'SESSION_INVALID', 'authenticated wallet missing');
+    }
     const tokenId = await this.prisma.$transaction((tx) =>
       this.tokenResolver.resolve(tx, tokenRef),
     );
@@ -36,7 +43,7 @@ export class CommentsService {
     const idempotencyWhere = {
       scope_walletAddress_key: {
         scope: COMMENT_SCOPE,
-        walletAddress: input.walletAddress,
+        walletAddress: wallet,
         key: idempotencyKey,
       },
     } as const;
@@ -48,15 +55,15 @@ export class CommentsService {
           await tx.idempotencyRequest.create({
             data: {
               scope: COMMENT_SCOPE,
-              walletAddress: input.walletAddress,
+              walletAddress: wallet,
               key: idempotencyKey,
               requestHash: hash,
               expiresAt: new Date(Date.now() + IDEMPOTENCY_RETENTION_MS),
             },
           });
           await tx.profile.upsert({
-            where: { walletAddress: input.walletAddress },
-            create: { walletAddress: input.walletAddress },
+            where: { walletAddress: wallet },
+            create: { walletAddress: wallet },
             update: {},
           });
           const id = randomUUID();
@@ -71,7 +78,7 @@ export class CommentsService {
             data: {
               id,
               tokenDbId: tokenId,
-              walletAddress: input.walletAddress,
+              walletAddress: wallet,
               parentId: input.parentCommentId,
               rootId: id,
               depth: 0,

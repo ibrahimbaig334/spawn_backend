@@ -13,8 +13,7 @@ if (!connectionString) {
 }
 
 const port = Number(process.env.BROADCASTER_WS_PORT ?? 3001);
-const pg = new Client({ connectionString });
-const broadcaster = new Broadcaster(pg, port);
+const broadcaster = new Broadcaster(() => new Client({ connectionString }), port);
 
 void broadcaster.start().catch((error) => {
   console.error('broadcaster failed to start:', error);

@@ -82,6 +82,10 @@ const baseSchema = z.object({
 
   // Rate limiting
   RATE_LIMIT_HMAC_KEY: z.string().min(32).optional(),
+
+  // Wallet session signing secret (HS256). Sessions prove wallet ownership
+  // for write endpoints (comments, likes). Required in production.
+  APP_JWT_SECRET: z.string().min(32).optional(),
 });
 
 export type Environment = z.infer<typeof baseSchema> & {
